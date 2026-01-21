@@ -1039,6 +1039,9 @@
             },
             
             showSyncIndicator(show) {
+                // Syncing berjalan di background tanpa indikator visual
+                // Uncomment kode di bawah jika ingin menampilkan indikator
+                /*
                 let indicator = document.getElementById('bgSyncIndicator');
                 
                 if (!indicator && show) {
@@ -1055,6 +1058,7 @@
                         setTimeout(() => indicator?.remove(), 300);
                     }
                 }
+                */
             }
         };
 
