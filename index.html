@@ -928,15 +928,34 @@
             async executeOperation(op) {
                 const { action, storeName, data } = op;
                 
-                switch (action) {
-                    case 'add':
-                        return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, ...data });
-                    case 'update':
-                        return await callGoogleScript('POST', { action: `update${this.capitalize(storeName)}`, ...data });
-                    case 'delete':
-                        return await callGoogleScript('POST', { action: `delete${this.capitalize(storeName)}`, id: data.id });
-                    default:
-                        throw new Error(`Unknown action: ${action}`);
+                try {
+                    switch (action) {
+                        case 'add':
+                            return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
+                        case 'update':
+                            const updateResult = await callGoogleScript('POST', { action: `update${this.capitalize(storeName)}`, data: data });
+                            // Smart retry: jika UPDATE gagal dengan "not found", coba CREATE
+                            if (updateResult.status !== 'success' && updateResult.message?.includes('not found')) {
+                                console.log(`UPDATE failed for ${storeName}, retrying as CREATE...`);
+                                return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
+                            }
+                            return updateResult;
+                        case 'delete':
+                            return await callGoogleScript('POST', { action: `delete${this.capitalize(storeName)}`, data: { id: data.id } });
+                        default:
+                            throw new Error(`Unknown action: ${action}`);
+                    }
+                } catch (error) {
+                    // Smart retry untuk network errors pada UPDATE
+                    if (action === 'update' && error.message?.includes('Failed')) {
+                        console.log(`UPDATE network error for ${storeName}, will retry as CREATE...`);
+                        try {
+                            return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
+                        } catch (retryError) {
+                            throw retryError;
+                        }
+                    }
+                    throw error;
                 }
             },
             
@@ -1167,50 +1186,49 @@
             },
             
             async addUser(userData) {
-                // Optimistic: tambah ke cache lokal dulu
-                const tempId = `temp-${Date.now()}`;
+                // Generate ID
+                const tempId = userData.id || `user-${Date.now()}`;
                 const newUser = { ...userData, id: tempId };
                 
-                // Update memory cache
+                // 1. Update React State (Optimistic UI)
                 const cached = CacheHelper.getCached('users') || [];
                 cached.push(newUser);
                 AppState.cache.set('users', { data: cached, timestamp: Date.now(), valid: true });
                 AppState.users = cached;
                 
-                // Update IndexedDB
+                // 2. Save to IndexedDB
                 await IndexedDBService.put('users', newUser);
                 
-                // Sync ke server (non-blocking)
-                const result = await callGoogleScript('POST', { action: 'addUser', data: userData });
+                // 3. Enqueue for background sync (non-blocking)
+                await BackgroundSync.queueOperation('add', 'users', newUser);
                 
-                if (result.status !== 'success') {
-                    // Rollback jika gagal
-                    const rollbackData = cached.filter(u => u.id !== tempId);
-                    AppState.cache.set('users', { data: rollbackData, timestamp: Date.now(), valid: true });
-                    AppState.users = rollbackData;
-                    await IndexedDBService.delete('users', tempId);
-                }
-                
-                return { success: result.status === 'success', message: result.message };
+                return { success: true, message: 'User berhasil ditambahkan' };
             },
             
             async updateUser(userData) {
-                // Optimistic update
+                // 1. Optimistic update
                 const cached = CacheHelper.getCached('users') || [];
                 const index = cached.findIndex(u => u.username === userData.username || u.id === userData.id);
+                let updatedUser = userData;
+                
                 if (index !== -1) {
-                    cached[index] = { ...cached[index], ...userData };
+                    updatedUser = { ...cached[index], ...userData };
+                    cached[index] = updatedUser;
                     AppState.cache.set('users', { data: cached, timestamp: Date.now(), valid: true });
                     AppState.users = cached;
-                    await IndexedDBService.put('users', cached[index]);
+                    
+                    // 2. Save to IndexedDB
+                    await IndexedDBService.put('users', updatedUser);
                 }
                 
-                const result = await callGoogleScript('POST', { action: 'updateUser', data: userData });
-                return { success: result.status === 'success', message: result.message };
+                // 3. Enqueue for background sync
+                await BackgroundSync.queueOperation('update', 'users', updatedUser);
+                
+                return { success: true, message: 'User berhasil diupdate' };
             },
             
             async deleteUser(username) {
-                // Optimistic delete
+                // 1. Optimistic delete
                 const cached = CacheHelper.getCached('users') || [];
                 const userToDelete = cached.find(u => u.username === username);
                 const filteredData = cached.filter(u => u.username !== username);
@@ -1218,12 +1236,15 @@
                 AppState.cache.set('users', { data: filteredData, timestamp: Date.now(), valid: true });
                 AppState.users = filteredData;
                 
+                // 2. Delete from IndexedDB
                 if (userToDelete?.id) {
                     await IndexedDBService.delete('users', userToDelete.id);
                 }
                 
-                const result = await callGoogleScript('POST', { action: 'deleteUser', data: { username: username } });
-                return { success: result.status === 'success', message: result.message };
+                // 3. Enqueue for background sync
+                await BackgroundSync.queueOperation('delete', 'users', { id: userToDelete?.id, username });
+                
+                return { success: true, message: 'User berhasil dihapus' };
             },
             
             // ============ QUESTIONS ============
@@ -1259,42 +1280,57 @@
             },
             
             async addQuestion(questionData) {
-                const tempId = questionData.id || `temp-${Date.now()}`;
+                const tempId = questionData.id || `q-${Date.now()}`;
                 const newQuestion = { ...questionData, id: tempId };
                 
-                // Optimistic update
+                // 1. Optimistic update
                 const cached = CacheHelper.getCached('questions') || [];
                 cached.push(newQuestion);
                 AppState.cache.set('questions', { data: cached, timestamp: Date.now(), valid: true });
+                
+                // 2. Save to IndexedDB
                 await IndexedDBService.put('questions', newQuestion);
                 
-                const result = await callGoogleScript('POST', { action: 'addQuestion', data: questionData });
-                return { success: result.status === 'success', message: result.message };
+                // 3. Enqueue for background sync
+                await BackgroundSync.queueOperation('add', 'questions', newQuestion);
+                
+                return { success: true, message: 'Soal berhasil ditambahkan' };
             },
             
             async addQuestions(questionsArray) {
-                // Optimistic: tambah semua ke cache
+                // 1. Optimistic update
                 const cached = CacheHelper.getCached('questions') || [];
-                const newQuestions = questionsArray.map((q, i) => ({ ...q, id: q.id || `temp-${Date.now()}-${i}` }));
+                const newQuestions = questionsArray.map((q, i) => ({ ...q, id: q.id || `q-${Date.now()}-${i}` }));
                 cached.push(...newQuestions);
                 AppState.cache.set('questions', { data: cached, timestamp: Date.now(), valid: true });
+                
+                // 2. Save to IndexedDB
                 await IndexedDBService.putBulk('questions', newQuestions);
                 
-                const result = await callGoogleScript('POST', { action: 'addQuestions', data: questionsArray });
-                return { success: result.status === 'success', message: result.message };
+                // 3. Enqueue each for background sync
+                for (const q of newQuestions) {
+                    await BackgroundSync.queueOperation('add', 'questions', q);
+                }
+                
+                return { success: true, message: `${newQuestions.length} soal berhasil ditambahkan` };
             },
             
             async updateQuestion(questionData) {
                 const cached = CacheHelper.getCached('questions') || [];
                 const index = cached.findIndex(q => q.id === questionData.id);
+                let updatedQuestion = questionData;
+                
                 if (index !== -1) {
-                    cached[index] = { ...cached[index], ...questionData };
+                    updatedQuestion = { ...cached[index], ...questionData };
+                    cached[index] = updatedQuestion;
                     AppState.cache.set('questions', { data: cached, timestamp: Date.now(), valid: true });
-                    await IndexedDBService.put('questions', cached[index]);
+                    await IndexedDBService.put('questions', updatedQuestion);
                 }
                 
-                const result = await callGoogleScript('POST', { action: 'updateQuestion', data: questionData });
-                return { success: result.status === 'success', message: result.message };
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('update', 'questions', updatedQuestion);
+                
+                return { success: true, message: 'Soal berhasil diupdate' };
             },
             
             async deleteQuestion(questionId) {
@@ -1303,8 +1339,10 @@
                 AppState.cache.set('questions', { data: filteredData, timestamp: Date.now(), valid: true });
                 await IndexedDBService.delete('questions', questionId);
                 
-                const result = await callGoogleScript('POST', { action: 'deleteQuestion', data: { id: questionId } });
-                return { success: result.status === 'success', message: result.message };
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('delete', 'questions', { id: questionId });
+                
+                return { success: true, message: 'Soal berhasil dihapus' };
             },
             
             async deleteQuestions(questionIds) {
@@ -1312,12 +1350,13 @@
                 const filteredData = cached.filter(q => !questionIds.includes(q.id));
                 AppState.cache.set('questions', { data: filteredData, timestamp: Date.now(), valid: true });
                 
+                // Delete from IndexedDB and enqueue
                 for (const id of questionIds) {
                     await IndexedDBService.delete('questions', id);
+                    await BackgroundSync.queueOperation('delete', 'questions', { id });
                 }
                 
-                const result = await callGoogleScript('POST', { action: 'deleteQuestions', data: { ids: questionIds } });
-                return { success: result.status === 'success', message: result.message };
+                return { success: true, message: `${questionIds.length} soal berhasil dihapus` };
             },
             
             // ============ RESULTS ============
@@ -1355,33 +1394,46 @@
             
             async addResults(resultsArray) {
                 const cached = CacheHelper.getCached('results') || [];
-                const newResults = resultsArray.map((r, i) => ({ ...r, id: r.id || `temp-${Date.now()}-${i}` }));
+                const newResults = resultsArray.map((r, i) => ({ ...r, id: r.id || `r-${Date.now()}-${i}` }));
                 cached.push(...newResults);
                 AppState.cache.set('results', { data: cached, timestamp: Date.now(), valid: true });
                 await IndexedDBService.putBulk('results', newResults);
                 
-                const result = await callGoogleScript('POST', { action: 'addResults', data: resultsArray });
-                return { success: result.status === 'success', message: result.message };
+                // Enqueue each for background sync
+                for (const r of newResults) {
+                    await BackgroundSync.queueOperation('add', 'results', r);
+                }
+                
+                return { success: true, message: `${newResults.length} hasil berhasil ditambahkan` };
             },
             
             async updateResult(resultData) {
                 const cached = CacheHelper.getCached('results') || [];
                 const index = cached.findIndex(r => r.id === resultData.id);
+                let updatedResult = resultData;
+                
                 if (index !== -1) {
-                    cached[index] = { ...cached[index], ...resultData };
+                    updatedResult = { ...cached[index], ...resultData };
+                    cached[index] = updatedResult;
                     AppState.cache.set('results', { data: cached, timestamp: Date.now(), valid: true });
-                    await IndexedDBService.put('results', cached[index]);
+                    await IndexedDBService.put('results', updatedResult);
                 }
                 
-                const result = await callGoogleScript('POST', { action: 'updateResult', data: resultData });
-                return { success: result.status === 'success', message: result.message };
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('update', 'results', updatedResult);
+                
+                return { success: true, message: 'Hasil berhasil diupdate' };
             },
             
             async deleteResults(filters) {
-                // Invalidate cache - will be refreshed on next get
-                await CacheHelper.invalidateCache('results');
-                const result = await callGoogleScript('POST', { action: 'deleteResults', data: filters });
-                return { success: result.status === 'success', message: result.message };
+                // Clear local cache and IndexedDB
+                AppState.cache.set('results', { data: [], timestamp: Date.now(), valid: false });
+                await IndexedDBService.clear('results');
+                
+                // Enqueue delete operation
+                await BackgroundSync.queueOperation('delete', 'results', filters);
+                
+                return { success: true, message: 'Hasil berhasil dihapus' };
             },
             
             // ============ GRADES ============
@@ -1418,7 +1470,7 @@
             },
             
             async addGrade(gradeData) {
-                const tempId = gradeData.id || `temp-${Date.now()}`;
+                const tempId = gradeData.id || `g-${Date.now()}`;
                 const newGrade = { ...gradeData, id: tempId };
                 
                 const cached = CacheHelper.getCached('grades') || [];
@@ -1426,21 +1478,28 @@
                 AppState.cache.set('grades', { data: cached, timestamp: Date.now(), valid: true });
                 await IndexedDBService.put('grades', newGrade);
                 
-                const result = await callGoogleScript('POST', { action: 'addGrade', data: gradeData });
-                return { success: result.status === 'success', message: result.message };
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('add', 'grades', newGrade);
+                
+                return { success: true, message: 'Nilai berhasil ditambahkan' };
             },
             
             async updateGrade(gradeData) {
                 const cached = CacheHelper.getCached('grades') || [];
                 const index = cached.findIndex(g => g.id === gradeData.id);
+                let updatedGrade = gradeData;
+                
                 if (index !== -1) {
-                    cached[index] = { ...cached[index], ...gradeData };
+                    updatedGrade = { ...cached[index], ...gradeData };
+                    cached[index] = updatedGrade;
                     AppState.cache.set('grades', { data: cached, timestamp: Date.now(), valid: true });
-                    await IndexedDBService.put('grades', cached[index]);
+                    await IndexedDBService.put('grades', updatedGrade);
                 }
                 
-                const result = await callGoogleScript('POST', { action: 'updateGrade', data: gradeData });
-                return { success: result.status === 'success', message: result.message };
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('update', 'grades', updatedGrade);
+                
+                return { success: true, message: 'Nilai berhasil diupdate' };
             },
             
             async deleteGrade(gradeId) {
@@ -1449,8 +1508,10 @@
                 AppState.cache.set('grades', { data: filteredData, timestamp: Date.now(), valid: true });
                 await IndexedDBService.delete('grades', gradeId);
                 
-                const result = await callGoogleScript('POST', { action: 'deleteGrade', data: { gradeId: gradeId } });
-                return { success: result.status === 'success', message: result.message };
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('delete', 'grades', { id: gradeId });
+                
+                return { success: true, message: 'Nilai berhasil dihapus' };
             },
             
             async deleteGrades(gradeIds) {
@@ -1460,10 +1521,10 @@
                 
                 for (const id of gradeIds) {
                     await IndexedDBService.delete('grades', id);
+                    await BackgroundSync.queueOperation('delete', 'grades', { id });
                 }
                 
-                const result = await callGoogleScript('POST', { action: 'deleteGrades', data: { gradeIds: gradeIds } });
-                return { success: result.status === 'success', message: result.message };
+                return { success: true, message: `${gradeIds.length} nilai berhasil dihapus` };
             },
             
             // ============ BLOCKED STUDENTS ============
@@ -1504,8 +1565,10 @@
                 AppState.cache.set('blockedStudents', { data: cached, timestamp: Date.now(), valid: true });
                 await IndexedDBService.put('blockedStudents', newBlock);
                 
-                const result = await callGoogleScript('POST', { action: 'blockStudent', data: blockData });
-                return { success: result.status === 'success', message: result.message };
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('add', 'blockedStudents', newBlock);
+                
+                return { success: true, message: 'Siswa berhasil diblokir' };
             },
             
             async unblockStudent(blockId) {
@@ -1514,16 +1577,20 @@
                 AppState.cache.set('blockedStudents', { data: filteredData, timestamp: Date.now(), valid: true });
                 await IndexedDBService.delete('blockedStudents', blockId);
                 
-                const result = await callGoogleScript('POST', { action: 'unblockStudent', data: { blockId: blockId } });
-                return { success: result.status === 'success', message: result.message };
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('delete', 'blockedStudents', { id: blockId });
+                
+                return { success: true, message: 'Siswa berhasil di-unblock' };
             },
             
             async unblockAllStudents() {
                 AppState.cache.set('blockedStudents', { data: [], timestamp: Date.now(), valid: true });
                 await IndexedDBService.clear('blockedStudents');
                 
-                const result = await callGoogleScript('POST', { action: 'unblockAllStudents', data: {} });
-                return { success: result.status === 'success', message: result.message };
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('delete', 'blockedStudents', { all: true });
+                
+                return { success: true, message: 'Semua siswa berhasil di-unblock' };
             },
             
             async isStudentBlocked(username, examCode) {
@@ -1574,8 +1641,10 @@
                 AppState.examConfig = data;
                 await IndexedDBService.put('settings', data);
                 
-                const result = await callGoogleScript('POST', { action: 'saveSettings', data: settingsData });
-                return { success: result.status === 'success', message: result.message };
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('update', 'settings', data);
+                
+                return { success: true, message: 'Pengaturan berhasil disimpan' };
             }
         };
 
