@@ -3502,14 +3502,14 @@
                         const existingGrade = existingGrades[0];
                         await DataService.updateGrade({
                             gradeId: existingGrade.gradeId,
+                            id: existingGrade.id || existingGrade.gradeId,
                             nilai: finalScore,
                             grade: grade,
                             keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
                         });
                         console.log(`Final grade updated for ${studentName} on exam ${examCode}. New score: ${finalScore}`);
                         
-                        // Clear grades cache to ensure fresh data on next view
-                        AppState.cache.delete('grades');
+                        // Cache sudah diupdate oleh DataService, tidak perlu delete
                     }
                 } catch (error) {
                     console.error(`Failed to recalculate final grade for ${studentName}:`, error);
@@ -3557,6 +3557,7 @@
                         // Update to SERVER
                         await DataService.updateGrade({
                             gradeId: existingGrade.gradeId,
+                            id: existingGrade.id || existingGrade.gradeId,
                             nilai: finalScore,
                             grade: grade,
                             keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
@@ -3564,8 +3565,7 @@
                         
                         console.log(`Final grade synced for ${studentName} on exam ${examCode}. New score: ${finalScore}`);
                         
-                        // Clear grades cache
-                        AppState.cache.delete('grades');
+                        // Cache sudah diupdate oleh DataService
                     }
                 } catch (error) {
                     console.error(`Failed to recalculate and sync final grade for ${studentName}:`, error);
@@ -3605,12 +3605,13 @@
                         // Update grade to server
                         await DataService.updateGrade({
                             gradeId: existingGrade.gradeId,
+                            id: existingGrade.id || existingGrade.gradeId,
                             nilai: finalScore,
                             grade: grade,
                             keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
                         });
                         
-                        AppState.cache.delete('grades');
+                        // Cache sudah diupdate oleh DataService
                         console.log(`Grade synced for ${studentName}: ${finalScore}`);
                     }
                 } catch (error) {
@@ -3679,31 +3680,26 @@
                     const newGrade = newNilai >= 90 ? 'A' : newNilai >= 80 ? 'B' : newNilai >= 70 ? 'C' : newNilai >= 60 ? 'D' : 'E';
                     const newKeterangan = newNilai >= 70 ? 'Lulus' : 'Tidak Lulus';
 
-                    // OPTIMISTIC UI: Close modal immediately
+                    // 1. OPTIMISTIC UI: Update cache langsung
+                    const updatedGradeData = {
+                        ...grade,
+                        gradeId: gradeId,
+                        id: grade.id || gradeId,
+                        nilai: newNilai,
+                        grade: newGrade,
+                        keterangan: newKeterangan
+                    };
+                    
+                    // 2. Gunakan DataService yang sudah pakai queue pattern
+                    await DataService.updateGrade(updatedGradeData);
+                    
+                    // 3. Close modal
                     UI.hideModal();
                     
-                    // Clear cache and refresh UI instantly
-                    AppState.cache.clear();
-                    document.getElementById('applyGradeFilterBtn').click();
+                    // 4. Refresh UI langsung dari cache (yang sudah diupdate oleh DataService)
+                    UI.loadAndRenderPaginatedGrades(false);
                     
-                    // BACKGROUND: Sync to server (fire and forget)
-                    callGoogleScript('POST', {
-                        action: 'updateGrade',
-                        data: {
-                            gradeId: gradeId,
-                            nilai: newNilai,
-                            grade: newGrade,
-                            keterangan: newKeterangan
-                        }
-                    }).then(response => {
-                        if (response.status !== 'success') {
-                            console.error('[Sync] Failed:', response.message);
-                            UI.showNotification('Gagal sync ke server', 'warning');
-                        }
-                    }).catch(err => {
-                        console.error('[Sync] Error:', err);
-                        UI.showNotification('Gagal sync ke server', 'warning');
-                    });
+                    UI.showNotification('Nilai berhasil diupdate!', 'success');
                 });
             },
 
@@ -5560,6 +5556,11 @@
                         keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus',
                         waktuSelesai: new Date().toLocaleString('id-ID')
                     });
+
+                    // PENTING: Proses queue SEBELUM logout agar data terkirim ke server
+                    if (navigator.onLine) {
+                        await BackgroundSync.processSyncQueue();
+                    }
 
                     Swal.fire({
                         title: 'Ujian Selesai!',
