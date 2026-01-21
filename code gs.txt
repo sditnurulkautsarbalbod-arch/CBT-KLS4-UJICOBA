@@ -1,0 +1,708 @@
+// =================================================================
+// GOOGLE APPS SCRIPT BACKEND (code.gs) - FULL GOOGLE SHEETS VERSION
+// No Firebase - All data stored in Google Sheets
+// =================================================================
+
+// Ganti dengan ID spreadsheet Anda
+var SPREADSHEET_ID = '1SuVpC5zb1wUtOgsLj_QwSwqNy0ggTDWZy_9XoFKbIQg';
+// GANTI DENGAN ID FOLDER GOOGLE DRIVE ANDA SESUAI TUTORIAL
+var DRIVE_FOLDER_ID = '1JSTyQugX_8qbpKLquvL6BLSps6NrlHCV';
+
+// =================================================================
+// SHEET NAMES CONFIGURATION
+// =================================================================
+var SHEETS = {
+  USERS: 'sheet1',
+  QUESTIONS: 'examQuestions',
+  RESULTS: 'examResults',
+  GRADES: 'grades',
+  BLOCKED_STUDENTS: 'blockedStudents',
+  SETTINGS: 'settings'
+};
+
+function doGet(e) {
+  try {
+    var action = e && e.parameter ? e.parameter.action : null;
+
+    switch (action) {
+      case 'getUsers':
+        return createJsonResponse({ status: 'success', data: getUsers() });
+      case 'getResults':
+        return createJsonResponse({ status: 'success', data: getResults(e.parameter) });
+      case 'getQuestions':
+        return createJsonResponse({ status: 'success', data: getQuestions(e.parameter) });
+      case 'getGrades':
+        return createJsonResponse({ status: 'success', data: getGrades(e.parameter) });
+      case 'getBlockedStudents':
+        return createJsonResponse({ status: 'success', data: getBlockedStudents() });
+      case 'checkBlockedStudent':
+        return createJsonResponse({ 
+          status: 'success', 
+          isBlocked: checkBlockedStudent(e.parameter.username, e.parameter.examCode) 
+        });
+      case 'getSettings':
+        return createJsonResponse({ status: 'success', data: getSettings(e.parameter) });
+      default:
+        if (!action) {
+          return createJsonResponse({ status: 'info', message: 'Skrip berjalan. Silakan akses melalui URL aplikasi web.' });
+        }
+        return createJsonResponse({ status: 'error', message: 'Aksi GET tidak valid.' });
+    }
+  } catch (error) {
+    Logger.log(error);
+    return createJsonResponse({ status: 'error', message: error.message, stack: error.stack });
+  }
+}
+
+
+function doPost(e) {
+  try {
+    var requestData = JSON.parse(e.postData.contents);
+    var action = requestData.action;
+
+    switch (action) {
+      // Result Actions
+      case 'addResults':
+        saveExamResultBatch(requestData.data);
+        return createJsonResponse({ status: 'success', message: 'Results saved successfully' });
+      case 'updateResult':
+        updateResult(requestData.data);
+        return createJsonResponse({ status: 'success', message: 'Result updated successfully' });
+      case 'updateResults':
+        updateResultsBatch(requestData.data);
+        return createJsonResponse({ status: 'success', message: 'Results updated successfully' });
+      case 'deleteResult':
+        deleteResult(requestData.data.resultId);
+        return createJsonResponse({ status: 'success', message: 'Result deleted successfully' });
+      case 'deleteResults':
+        deleteResultsBatch(requestData.data.resultIds);
+        return createJsonResponse({ status: 'success', message: 'Results deleted successfully' });
+      
+      // Question Actions
+      case 'addQuestion':
+        addQuestion(requestData.data);
+        return createJsonResponse({ status: 'success', message: 'Question added successfully' });
+      case 'addQuestionsBatch':
+        addQuestionsBatch(requestData.data);
+        return createJsonResponse({ status: 'success', message: 'Questions added successfully' });
+      case 'updateQuestion':
+        updateQuestion(requestData.data);
+        return createJsonResponse({ status: 'success', message: 'Question updated successfully' });
+      case 'deleteQuestion':
+        deleteQuestion(requestData.data.id);
+        return createJsonResponse({ status: 'success', message: 'Question deleted successfully' });
+      case 'deleteQuestionsBatch':
+        deleteQuestionsBatch(requestData.data.ids);
+        return createJsonResponse({ status: 'success', message: 'Questions deleted successfully' });
+
+      // Grade Actions (NEW)
+      case 'addGrade':
+        addGrade(requestData.data);
+        return createJsonResponse({ status: 'success', message: 'Grade added successfully' });
+      case 'updateGrade':
+        updateGrade(requestData.data);
+        return createJsonResponse({ status: 'success', message: 'Grade updated successfully' });
+      case 'deleteGrade':
+        deleteGrade(requestData.data.gradeId);
+        return createJsonResponse({ status: 'success', message: 'Grade deleted successfully' });
+      case 'deleteGrades':
+        deleteGradesBatch(requestData.data.gradeIds);
+        return createJsonResponse({ status: 'success', message: 'Grades deleted successfully' });
+
+      // Blocked Students Actions (NEW)
+      case 'blockStudent':
+        blockStudent(requestData.data);
+        return createJsonResponse({ status: 'success', message: 'Student blocked successfully' });
+      case 'unblockStudent':
+        unblockStudent(requestData.data.blockId);
+        return createJsonResponse({ status: 'success', message: 'Student unblocked successfully' });
+      case 'unblockAllStudents':
+        unblockAllStudents();
+        return createJsonResponse({ status: 'success', message: 'All students unblocked successfully' });
+
+      // Settings Actions (NEW)
+      case 'saveSettings':
+        saveSettings(requestData.data);
+        return createJsonResponse({ status: 'success', message: 'Settings saved successfully' });
+
+      default:
+        return createJsonResponse({ status: 'error', message: 'Aksi POST tidak valid.' });
+    }
+  } catch (error) {
+    Logger.log('doPost Error: ' + error.toString() + ' Stack: ' + error.stack);
+    return createJsonResponse({ status: 'error', message: 'Gagal memproses permintaan: ' + error.message });
+  }
+}
+
+function createJsonResponse(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// =================================================================
+// GOOGLE DRIVE HELPER
+// =================================================================
+function uploadImageToDrive(base64Data, fileName) {
+  try {
+    if (!DRIVE_FOLDER_ID || DRIVE_FOLDER_ID === 'YOUR_DRIVE_FOLDER_ID_HERE') {
+      throw new Error("ID Folder Google Drive belum diatur di dalam skrip.");
+    }
+    
+    var folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+    var contentType = base64Data.substring(5, base64Data.indexOf(';'));
+    var bytes = Utilities.base64Decode(base64Data.substr(base64Data.indexOf('base64,') + 7));
+    var blob = Utilities.newBlob(bytes, contentType, fileName);
+    
+    var file = folder.createFile(blob);
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    
+    return 'https://lh3.googleusercontent.com/d/' + file.getId();
+  } catch(e) {
+    Logger.log('Error uploading to Drive: ' + e.toString());
+    return null;
+  }
+}
+
+// =================================================================
+// HELPER FUNCTIONS
+// =================================================================
+
+function getSheetData(sheetName) {
+  var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(sheetName);
+  if (!sheet) throw new Error("Sheet '" + sheetName + "' tidak ditemukan.");
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    return [];
+  }
+  
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var data = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+
+  return data.map(function(row) {
+    var obj = {};
+    headers.forEach(function(header, index) {
+      obj[header] = row[index];
+    });
+    return obj;
+  });
+}
+
+function ensureSheetExists(sheetName, headers) {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var sheet = ss.getSheetByName(sheetName);
+  
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    if (headers && headers.length > 0) {
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    }
+  }
+  
+  return sheet;
+}
+
+// =================================================================
+// USER MANAGEMENT
+// =================================================================
+
+function getUsers() {
+  return getSheetData(SHEETS.USERS);
+}
+
+// =================================================================
+// RESULT MANAGEMENT
+// =================================================================
+
+function getResults(filters) {
+  var allResults = getSheetData(SHEETS.RESULTS);
+  
+  return allResults.filter(function(result) {
+    for (var key in filters) {
+      if (key === 'action') continue;
+      if (filters[key]) {
+        if (!result[key] && result[key] !== 0) return false;
+        if (!String(result[key]).toLowerCase().includes(String(filters[key]).toLowerCase())) {
+           return false;
+        }
+      }
+    }
+    return true;
+  });
+}
+
+function saveExamResultBatch(resultsData) {
+  if (!resultsData || !Array.isArray(resultsData) || resultsData.length === 0) return;
+
+  var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEETS.RESULTS);
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  
+  var rowsToAdd = resultsData.map(function(result) {
+    return headers.map(function(header) {
+      var value = result[header] !== undefined ? result[header] : '';
+      
+      if (header === 'jawabanSiswa' && value !== '') {
+        return "'" + value;
+      }
+      
+      return value;
+    });
+  });
+
+  if (rowsToAdd.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAdd.length, headers.length).setValues(rowsToAdd);
+  }
+}
+
+function updateResultsBatch(updates) {
+  if (!updates || !Array.isArray(updates) || updates.length === 0) return;
+
+  var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEETS.RESULTS);
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0];
+  var resultIdColIndex = headers.indexOf('resultId');
+  if (resultIdColIndex === -1) return;
+
+  var idToRowMap = {};
+  for(var i = 1; i < data.length; i++) {
+    idToRowMap[data[i][resultIdColIndex]] = i;
+  }
+  
+  var nilaiColIndex = headers.indexOf('nilai');
+  var statusColIndex = headers.indexOf('status');
+
+  updates.forEach(function(update) {
+    var rowIndex = idToRowMap[update.resultId];
+    if (rowIndex !== undefined) {
+      if (nilaiColIndex > -1) data[rowIndex][nilaiColIndex] = update.nilai;
+      if (statusColIndex > -1) data[rowIndex][statusColIndex] = update.status;
+    }
+  });
+  
+  sheet.getRange(1, 1, data.length, data[0].length).setValues(data);
+}
+
+function deleteResultsBatch(resultIds) {
+  if (!resultIds || !Array.isArray(resultIds) || resultIds.length === 0) return;
+
+  var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEETS.RESULTS);
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0];
+  var resultIdColIndex = headers.indexOf('resultId');
+  if (resultIdColIndex === -1) return;
+  
+  var rowsToDelete = [];
+  var resultIdsSet = new Set(resultIds);
+
+  for (var i = 1; i < data.length; i++) {
+    if (resultIdsSet.has(data[i][resultIdColIndex])) {
+      rowsToDelete.push(i + 1);
+    }
+  }
+  
+  for (var i = rowsToDelete.length - 1; i >= 0; i--) {
+    sheet.deleteRow(rowsToDelete[i]);
+  }
+}
+
+function updateResult(data) { updateResultsBatch([data]); }
+function deleteResult(resultId) { deleteResultsBatch([resultId]); }
+
+
+// =================================================================
+// QUESTION MANAGEMENT
+// =================================================================
+
+function getQuestions(filters) {
+  var allQuestions = getSheetData(SHEETS.QUESTIONS);
+
+  var filtered = allQuestions.filter(function(q) {
+    for (var key in filters) {
+      if (key === 'action') continue;
+      if (filters[key]) {
+        if (!q[key] && q[key] !== 0) return false;
+        if (!String(q[key]).toLowerCase().includes(String(filters[key]).toLowerCase())) {
+          return false;
+        }
+      }
+    }
+    return true;
+  });
+
+  return filtered.map(function(q) {
+    try {
+      if(q.pilihan && typeof q.pilihan === 'string' && q.pilihan.startsWith('[')) {
+        q.pilihan = JSON.parse(q.pilihan);
+      }
+    } catch(e) { 
+      q.pilihan = []; 
+    }
+    if (!Array.isArray(q.pilihan)) {
+        q.pilihan = [];
+    }
+
+    q.correct = (q.correct !== "" && q.correct !== null && !isNaN(q.correct)) ? Number(q.correct) : null;
+    return q;
+  });
+}
+
+function addQuestionsBatch(questionsData) {
+  if (!questionsData || !Array.isArray(questionsData) || questionsData.length === 0) return;
+  
+  var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEETS.QUESTIONS);
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+
+  var rowsToAdd = questionsData.map(function(q) {
+      q.id = Utilities.getUuid();
+      q.createdAt = new Date().toISOString();
+      
+      if (q.gambar && q.gambar.startsWith('data:image')) {
+        var imageName = 'img_' + q.id + '_' + new Date().getTime();
+        var imageUrl = uploadImageToDrive(q.gambar, imageName);
+        if (imageUrl) {
+          q.gambar = imageUrl;
+        } else {
+          q.gambar = '';
+        }
+      }
+
+      if (Array.isArray(q.pilihan)) {
+          q.pilihan = JSON.stringify(q.pilihan);
+      }
+      return headers.map(function(header) { return q[header] !== undefined ? q[header] : ''; });
+  });
+  if (rowsToAdd.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAdd.length, headers.length).setValues(rowsToAdd);
+  }
+}
+
+function addQuestion(questionData) {
+  addQuestionsBatch([questionData]);
+}
+
+function updateQuestion(questionData) {
+    var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEETS.QUESTIONS);
+    var dataRange = sheet.getDataRange();
+    var values = dataRange.getValues();
+    var headers = values[0];
+    var idColIndex = headers.indexOf('id');
+
+    if (idColIndex === -1) throw new Error("Kolom 'id' tidak ditemukan di sheet examQuestions.");
+
+    var rowIndexToUpdate = -1;
+    for (var i = 1; i < values.length; i++) {
+        if (values[i][idColIndex] == questionData.id) {
+            rowIndexToUpdate = i + 1;
+            break;
+        }
+    }
+
+    if (rowIndexToUpdate !== -1) {
+        if (questionData.gambar && questionData.gambar.startsWith('data:image')) {
+          var imageName = 'img_' + questionData.id + '_' + new Date().getTime();
+          var imageUrl = uploadImageToDrive(questionData.gambar, imageName);
+          if (imageUrl) {
+            questionData.gambar = imageUrl;
+          } else {
+            delete questionData.gambar;
+          }
+        }
+        
+        if (Array.isArray(questionData.pilihan)) {
+            questionData.pilihan = JSON.stringify(questionData.pilihan);
+        }
+        
+        var newRow = headers.map(function(header, index) {
+            return questionData[header] !== undefined ? questionData[header] : values[rowIndexToUpdate - 1][index];
+        });
+        
+        sheet.getRange(rowIndexToUpdate, 1, 1, headers.length).setValues([newRow]);
+    }
+}
+
+
+function deleteQuestionsBatch(ids) {
+  if (!ids || !Array.isArray(ids) || ids.length === 0) return;
+
+  var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEETS.QUESTIONS);
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0];
+  var idColIndex = headers.indexOf('id');
+  if (idColIndex === -1) return;
+  
+  var rowsToDelete = [];
+  var idsSet = new Set(ids);
+
+  for (var i = 1; i < data.length; i++) {
+    if (idsSet.has(data[i][idColIndex])) {
+      rowsToDelete.push(i + 1);
+    }
+  }
+  
+  for (var i = rowsToDelete.length - 1; i >= 0; i--) {
+    sheet.deleteRow(rowsToDelete[i]);
+  }
+}
+
+function deleteQuestion(id) {
+  deleteQuestionsBatch([id]);
+}
+
+// =================================================================
+// GRADES MANAGEMENT (NEW - Replaces Firebase)
+// =================================================================
+
+function getGrades(filters) {
+  var headers = ['gradeId', 'kelas', 'namaSiswa', 'kodeSoal', 'mataPelajaran', 'semester', 'tahunAjaran', 'nilai', 'grade', 'keterangan', 'waktuSelesai'];
+  ensureSheetExists(SHEETS.GRADES, headers);
+  
+  var allGrades = getSheetData(SHEETS.GRADES);
+  
+  return allGrades.filter(function(grade) {
+    for (var key in filters) {
+      if (key === 'action') continue;
+      if (filters[key]) {
+        if (!grade[key] && grade[key] !== 0) return false;
+        if (!String(grade[key]).toLowerCase().includes(String(filters[key]).toLowerCase())) {
+          return false;
+        }
+      }
+    }
+    return true;
+  });
+}
+
+function addGrade(gradeData) {
+  var headers = ['gradeId', 'kelas', 'namaSiswa', 'kodeSoal', 'mataPelajaran', 'semester', 'tahunAjaran', 'nilai', 'grade', 'keterangan', 'waktuSelesai'];
+  var sheet = ensureSheetExists(SHEETS.GRADES, headers);
+  
+  gradeData.gradeId = Utilities.getUuid();
+  
+  var row = headers.map(function(header) {
+    return gradeData[header] !== undefined ? gradeData[header] : '';
+  });
+  
+  sheet.getRange(sheet.getLastRow() + 1, 1, 1, headers.length).setValues([row]);
+}
+
+function updateGrade(gradeData) {
+  var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEETS.GRADES);
+  if (!sheet) return;
+  
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0];
+  var gradeIdColIndex = headers.indexOf('gradeId');
+  if (gradeIdColIndex === -1) return;
+  
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][gradeIdColIndex] === gradeData.gradeId) {
+      var newRow = headers.map(function(header, index) {
+        return gradeData[header] !== undefined ? gradeData[header] : data[i][index];
+      });
+      sheet.getRange(i + 1, 1, 1, headers.length).setValues([newRow]);
+      break;
+    }
+  }
+}
+
+function deleteGrade(gradeId) {
+  deleteGradesBatch([gradeId]);
+}
+
+function deleteGradesBatch(gradeIds) {
+  if (!gradeIds || !Array.isArray(gradeIds) || gradeIds.length === 0) return;
+  
+  var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEETS.GRADES);
+  if (!sheet) return;
+  
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0];
+  var gradeIdColIndex = headers.indexOf('gradeId');
+  if (gradeIdColIndex === -1) return;
+  
+  var rowsToDelete = [];
+  var idsSet = new Set(gradeIds);
+  
+  for (var i = 1; i < data.length; i++) {
+    if (idsSet.has(data[i][gradeIdColIndex])) {
+      rowsToDelete.push(i + 1);
+    }
+  }
+  
+  for (var i = rowsToDelete.length - 1; i >= 0; i--) {
+    sheet.deleteRow(rowsToDelete[i]);
+  }
+}
+
+// =================================================================
+// BLOCKED STUDENTS MANAGEMENT (NEW - Replaces Firebase)
+// =================================================================
+
+function getBlockedStudents() {
+  var headers = ['blockId', 'username', 'examCode', 'blockedAt'];
+  ensureSheetExists(SHEETS.BLOCKED_STUDENTS, headers);
+  
+  return getSheetData(SHEETS.BLOCKED_STUDENTS);
+}
+
+function blockStudent(data) {
+  var headers = ['blockId', 'username', 'examCode', 'blockedAt'];
+  var sheet = ensureSheetExists(SHEETS.BLOCKED_STUDENTS, headers);
+  
+  // Check if already blocked
+  var existingData = getSheetData(SHEETS.BLOCKED_STUDENTS);
+  var alreadyBlocked = existingData.some(function(b) {
+    return b.username === data.username && b.examCode === data.examCode;
+  });
+  
+  if (!alreadyBlocked) {
+    data.blockId = data.username + '_' + data.examCode;
+    data.blockedAt = new Date().toISOString();
+    
+    var row = headers.map(function(header) {
+      return data[header] !== undefined ? data[header] : '';
+    });
+    
+    sheet.getRange(sheet.getLastRow() + 1, 1, 1, headers.length).setValues([row]);
+  }
+}
+
+function unblockStudent(blockId) {
+  var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEETS.BLOCKED_STUDENTS);
+  if (!sheet) return;
+  
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0];
+  var blockIdColIndex = headers.indexOf('blockId');
+  if (blockIdColIndex === -1) return;
+  
+  for (var i = data.length - 1; i >= 1; i--) {
+    if (data[i][blockIdColIndex] === blockId) {
+      sheet.deleteRow(i + 1);
+      break;
+    }
+  }
+}
+
+function unblockAllStudents() {
+  var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEETS.BLOCKED_STUDENTS);
+  if (!sheet) return;
+  
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    sheet.deleteRows(2, lastRow - 1);
+  }
+}
+
+function checkBlockedStudent(username, examCode) {
+  if (!username || !examCode) return false;
+  
+  var headers = ['blockId', 'username', 'examCode', 'blockedAt'];
+  ensureSheetExists(SHEETS.BLOCKED_STUDENTS, headers);
+  
+  var data = getSheetData(SHEETS.BLOCKED_STUDENTS);
+  return data.some(function(b) {
+    return b.username === username && b.examCode === examCode;
+  });
+}
+
+// =================================================================
+// SETTINGS MANAGEMENT (NEW - Replaces Firebase)
+// =================================================================
+
+function getSettings(params) {
+  var headers = ['key', 'value'];
+  ensureSheetExists(SHEETS.SETTINGS, headers);
+  
+  var data = getSheetData(SHEETS.SETTINGS);
+  var settings = {};
+  
+  data.forEach(function(row) {
+    try {
+      // Try to parse JSON values
+      settings[row.key] = JSON.parse(row.value);
+    } catch(e) {
+      settings[row.key] = row.value;
+    }
+  });
+  
+  // Default values
+  if (!settings.durationMinutes) {
+    settings.durationMinutes = 60;
+  }
+  
+  // If specific key requested, return just that setting
+  if (params && params.key) {
+    if (params.key === 'examConfig') {
+      return {
+        durationMinutes: settings.durationMinutes || 60
+      };
+    }
+    return settings[params.key] || null;
+  }
+  
+  return settings;
+}
+
+function saveSettings(settingsData) {
+  var headers = ['key', 'value'];
+  var sheet = ensureSheetExists(SHEETS.SETTINGS, headers);
+  
+  // Clear existing data (except header)
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    sheet.deleteRows(2, lastRow - 1);
+  }
+  
+  // Add new settings
+  var rows = [];
+  for (var key in settingsData) {
+    if (settingsData.hasOwnProperty(key)) {
+      rows.push([key, settingsData[key]]);
+    }
+  }
+  
+  if (rows.length > 0) {
+    sheet.getRange(2, 1, rows.length, 2).setValues(rows);
+  }
+}
+
+// =================================================================
+// UTILITY FUNCTION - Recalculate Grade
+// =================================================================
+
+function recalculateStudentGrade(studentName, examCode) {
+  // Get all results for this student and exam
+  var results = getResults({ namaLengkap: studentName, kodesoal: examCode });
+  
+  if (results.length === 0) return null;
+  
+  // Calculate total score
+  var totalScore = 0;
+  results.forEach(function(r) {
+    totalScore += Number(r.nilai) || 0;
+  });
+  
+  var finalScore = Math.round(totalScore / results.length);
+  var grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
+  var keterangan = finalScore >= 70 ? 'Lulus' : 'Tidak Lulus';
+  
+  // Find and update existing grade or return data for new grade
+  var existingGrades = getGrades({ namaSiswa: studentName, kodeSoal: examCode });
+  
+  if (existingGrades.length > 0) {
+    var gradeToUpdate = existingGrades[0];
+    updateGrade({
+      gradeId: gradeToUpdate.gradeId,
+      nilai: finalScore,
+      grade: grade,
+      keterangan: keterangan
+    });
+  }
+  
+  return {
+    nilai: finalScore,
+    grade: grade,
+    keterangan: keterangan
+  };
+}
