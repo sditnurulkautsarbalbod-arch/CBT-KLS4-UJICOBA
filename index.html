@@ -1912,6 +1912,7 @@
             selectedExamCode: null,
             violationCount: 0, // Replaces fullscreenViolations
             lastQuestionData: { semester: '', tahunAjaran: '' }, // To store last used question data for teacher
+            pendingGradeUpdates: {}, // Key: "studentName|examCode", Value: {nilai, grade, keterangan}
             filters: {
                 questions: { kelas: '', mataPelajaran: '', kode: '' },
                 results: { kodesoal: '', mataPelajaran: '', kelas: '', namaLengkap: '' },
@@ -3230,7 +3231,10 @@
                         }
                     }
                     
-                    // === STEP 2: Hitung ulang grade dan update UI Daftar Nilai LANGSUNG via DOM ===
+                    // === STEP 2: Hitung ulang grade dan SIMPAN PENDING UPDATE ===
+                    const studentName = result.namaLengkap;
+                    const examCode = result.kodesoal;
+                    
                     // Ambil semua results dari tabel yang sedang ditampilkan
                     const allResultRows = document.querySelectorAll('#resultsTableBody tr[data-result-id]');
                     let totalScore = 0;
@@ -3254,8 +3258,8 @@
                     
                     // Jika tidak ada di DOM, gunakan cache
                     if (countResults === 0) {
-                        const cachedResults = AppState.cache.get(cacheKey) || [];
-                        cachedResults.forEach(r => {
+                        const cachedResultsLocal = AppState.cache.get(cacheKey) || [];
+                        cachedResultsLocal.forEach(r => {
                             if (r.namaLengkap === studentName && r.kodesoal === examCode) {
                                 // Update nilai jika ini adalah result yang diedit
                                 const nilai = (r.resultId === resultId) ? newNilai : (Number(r.nilai) || 0);
@@ -3278,7 +3282,17 @@
                     const gradeValue = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     const keterangan = finalScore >= 70 ? 'Lulus' : 'Tidak Lulus';
                     
-                    // UPDATE DOM Daftar Nilai LANGSUNG
+                    // === SIMPAN PENDING GRADE UPDATE ===
+                    // Ini akan diterapkan ketika user membuka halaman Daftar Nilai
+                    const pendingKey = `${studentName}|${examCode}`;
+                    AppState.pendingGradeUpdates[pendingKey] = {
+                        nilai: finalScore,
+                        grade: gradeValue,
+                        keterangan: keterangan
+                    };
+                    console.log(`[PENDING UPDATE] Saved for ${studentName}: ${finalScore} (${gradeValue})`);
+                    
+                    // UPDATE DOM Daftar Nilai LANGSUNG jika ada di DOM
                     const gradeRow = document.querySelector(`tr[data-student="${studentName}"][data-exam="${examCode}"]`);
                     if (gradeRow) {
                         const nilaiCell = gradeRow.querySelector('.grade-nilai');
@@ -6187,6 +6201,42 @@
                 // SMART CACHE: Only clear if forceRefresh
                 if (forceRefresh) {
                     AppState.cache.delete(cacheKey);
+                }
+                
+                // === APPLY PENDING GRADE UPDATES ===
+                // Jika ada pending updates dari edit hasil ujian, terapkan ke cache
+                const hasPendingUpdates = Object.keys(AppState.pendingGradeUpdates).length > 0;
+                if (hasPendingUpdates) {
+                    console.log('[Grades] Applying pending updates:', AppState.pendingGradeUpdates);
+                    
+                    // Apply to global cache
+                    const globalCache = CacheHelper.getCached('grades') || [];
+                    for (const key in AppState.pendingGradeUpdates) {
+                        const [studentName, examCode] = key.split('|');
+                        const update = AppState.pendingGradeUpdates[key];
+                        
+                        const gradeIdx = globalCache.findIndex(g => 
+                            g.namaSiswa === studentName && g.kodeSoal === examCode
+                        );
+                        
+                        if (gradeIdx !== -1) {
+                            globalCache[gradeIdx].nilai = update.nilai;
+                            globalCache[gradeIdx].grade = update.grade;
+                            globalCache[gradeIdx].keterangan = update.keterangan;
+                            console.log(`[Grades] Applied pending update for ${studentName}: ${update.nilai}`);
+                        }
+                    }
+                    
+                    // Save updated global cache
+                    if (globalCache.length > 0) {
+                        AppState.cache.set('grades', { data: globalCache, timestamp: Date.now(), valid: true });
+                    }
+                    
+                    // Clear filtered cache so it gets regenerated
+                    AppState.cache.delete(cacheKey);
+                    
+                    // Clear pending updates
+                    AppState.pendingGradeUpdates = {};
                 }
                 
                 // Check filtered cache first
