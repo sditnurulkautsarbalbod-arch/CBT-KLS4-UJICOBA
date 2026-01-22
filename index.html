@@ -1509,8 +1509,16 @@
                     cached.push(updatedGrade);
                 }
                 
-                // Update cache
+                // Update cache global
                 AppState.cache.set('grades', { data: cached, timestamp: Date.now(), valid: true });
+                
+                // PENTING: Clear semua filtered cache untuk grades agar data konsisten
+                // Ini akan memaksa loadAndRenderPaginatedGrades untuk fetch dari cache global
+                AppState.cache._data.forEach((value, key) => {
+                    if (typeof key === 'string' && key.startsWith('grades_')) {
+                        AppState.cache.delete(key);
+                    }
+                });
                 
                 // Update IndexedDB
                 await IndexedDBService.put('grades', updatedGrade);
@@ -5970,13 +5978,35 @@
                     AppState.cache.delete(cacheKey);
                 }
                 
-                // Check cache first
+                // Check filtered cache first
                 let cachedData = AppState.cache.get(cacheKey);
                 
-                // If cache exists, use it immediately (no loading spinner)
+                // If filtered cache exists, use it immediately
                 if (cachedData && cachedData.length >= 0) {
-                    console.log('[Grades] Using cached data:', cachedData.length, 'items');
+                    console.log('[Grades] Using filtered cache:', cachedData.length, 'items');
                     this.renderGradesFromCache(cachedData, filters);
+                    return;
+                }
+                
+                // FALLBACK: Check global grades cache and filter locally
+                const globalCache = CacheHelper.getCached('grades');
+                if (globalCache && globalCache.length > 0) {
+                    console.log('[Grades] Using global cache, filtering locally...');
+                    let filteredGrades = globalCache.filter(g => {
+                        if (filters.tahunAjaran && g.tahunAjaran !== filters.tahunAjaran) return false;
+                        if (filters.semester && g.semester !== filters.semester) return false;
+                        if (filters.kodeSoal && g.kodeSoal !== filters.kodeSoal) return false;
+                        if (filters.mataPelajaran && g.mataPelajaran !== filters.mataPelajaran) return false;
+                        if (filters.kelas && g.kelas !== filters.kelas) return false;
+                        if (filters.namaSiswa && g.namaSiswa !== filters.namaSiswa) return false;
+                        return true;
+                    });
+                    filteredGrades.sort((a, b) => (a.namaSiswa || '').localeCompare(b.namaSiswa || ''));
+                    
+                    // Save to filtered cache for next time
+                    AppState.cache.set(cacheKey, filteredGrades);
+                    
+                    this.renderGradesFromCache(filteredGrades, filters);
                     return;
                 }
                 
