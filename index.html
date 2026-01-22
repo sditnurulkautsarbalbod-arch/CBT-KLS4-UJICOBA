@@ -886,9 +886,9 @@
                 
                 await IndexedDBService.put('syncQueue', operation);
                 
-                // Try to sync immediately if online
+                // Sync immediately if online (dengan await untuk memastikan terkirim)
                 if (navigator.onLine) {
-                    this.processSyncQueue();
+                    await this.processSyncQueue();
                 }
                 
                 return operation;
@@ -932,6 +932,9 @@
                     switch (action) {
                         case 'add':
                             return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
+                        case 'addBatch':
+                            // Untuk batch operations (seperti addResults dengan array)
+                            return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
                         case 'update':
                             const updateResult = await callGoogleScript('POST', { action: `update${this.capitalize(storeName)}`, data: data });
                             // Smart retry: jika UPDATE gagal dengan "not found", coba CREATE
@@ -941,7 +944,7 @@
                             }
                             return updateResult;
                         case 'delete':
-                            return await callGoogleScript('POST', { action: `delete${this.capitalize(storeName)}`, data: { id: data.id } });
+                            return await callGoogleScript('POST', { action: `delete${this.capitalize(storeName)}`, data: { id: data.id, ...data } });
                         default:
                             throw new Error(`Unknown action: ${action}`);
                     }
@@ -1399,10 +1402,8 @@
                 AppState.cache.set('results', { data: cached, timestamp: Date.now(), valid: true });
                 await IndexedDBService.putBulk('results', newResults);
                 
-                // Enqueue each for background sync
-                for (const r of newResults) {
-                    await BackgroundSync.queueOperation('add', 'results', r);
-                }
+                // Enqueue sebagai SATU batch operation, bukan per-item
+                await BackgroundSync.queueOperation('addBatch', 'results', newResults);
                 
                 return { success: true, message: `${newResults.length} hasil berhasil ditambahkan` };
             },
@@ -5557,10 +5558,8 @@
                         waktuSelesai: new Date().toLocaleString('id-ID')
                     });
 
-                    // PENTING: Proses queue SEBELUM logout agar data terkirim ke server
-                    if (navigator.onLine) {
-                        await BackgroundSync.processSyncQueue();
-                    }
+                    // Queue sudah otomatis diproses oleh queueOperation()
+                    // Tidak perlu memanggil processSyncQueue() lagi untuk menghindari duplikasi
 
                     Swal.fire({
                         title: 'Ujian Selesai!',
