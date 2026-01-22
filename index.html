@@ -935,6 +935,9 @@
                         case 'addBatch':
                             // Untuk batch operations (seperti addResults dengan array)
                             return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
+                        case 'addQuestionsBatch':
+                            // Special case: GAS expects 'addQuestionsBatch' action name
+                            return await callGoogleScript('POST', { action: 'addQuestionsBatch', data: data });
                         case 'update':
                             const updateResult = await callGoogleScript('POST', { action: `update${this.capitalize(storeName)}`, data: data });
                             // Smart retry: jika UPDATE gagal dengan "not found", coba CREATE
@@ -1310,10 +1313,8 @@
                 // 2. Save to IndexedDB
                 await IndexedDBService.putBulk('questions', newQuestions);
                 
-                // 3. Enqueue each for background sync
-                for (const q of newQuestions) {
-                    await BackgroundSync.queueOperation('add', 'questions', q);
-                }
+                // 3. Enqueue as batch - use special action name for GAS compatibility
+                await BackgroundSync.queueOperation('addQuestionsBatch', 'questions', newQuestions);
                 
                 return { success: true, message: `${newQuestions.length} soal berhasil ditambahkan` };
             },
