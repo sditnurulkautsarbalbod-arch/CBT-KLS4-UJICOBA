@@ -1491,18 +1491,37 @@
             
             async updateGrade(gradeData) {
                 const cached = CacheHelper.getCached('grades') || [];
-                const index = cached.findIndex(g => g.id === gradeData.id);
+                // Cari dengan id ATAU gradeId (untuk kompatibilitas)
+                const index = cached.findIndex(g => 
+                    g.id === gradeData.id || 
+                    g.id === gradeData.gradeId || 
+                    g.gradeId === gradeData.gradeId ||
+                    g.gradeId === gradeData.id
+                );
                 let updatedGrade = gradeData;
                 
                 if (index !== -1) {
                     updatedGrade = { ...cached[index], ...gradeData };
                     cached[index] = updatedGrade;
-                    AppState.cache.set('grades', { data: cached, timestamp: Date.now(), valid: true });
-                    await IndexedDBService.put('grades', updatedGrade);
+                } else {
+                    // Jika tidak ditemukan, tambahkan sebagai baru
+                    updatedGrade = { ...gradeData, id: gradeData.id || gradeData.gradeId };
+                    cached.push(updatedGrade);
                 }
+                
+                // Update cache
+                AppState.cache.set('grades', { data: cached, timestamp: Date.now(), valid: true });
+                
+                // Update IndexedDB
+                await IndexedDBService.put('grades', updatedGrade);
                 
                 // Enqueue for background sync
                 await BackgroundSync.queueOperation('update', 'grades', updatedGrade);
+                
+                // TRIGGER: Auto-refresh UI Daftar Nilai jika sedang terbuka
+                if (typeof UI !== 'undefined' && typeof UI.refreshGradesUIIfVisible === 'function') {
+                    UI.refreshGradesUIIfVisible();
+                }
                 
                 return { success: true, message: 'Nilai berhasil diupdate' };
             },
@@ -6016,6 +6035,17 @@
                     AppState.pagination.grades.currentPage = newPage;
                     this.loadAndRenderPaginatedGrades();
                 });
+            },
+
+            // AUTO-REFRESH: Refresh UI Daftar Nilai jika sedang terbuka
+            refreshGradesUIIfVisible() {
+                const gradesTableBody = document.getElementById('gradesTableBody');
+                // Cek apakah menu Daftar Nilai sedang aktif/terlihat
+                if (gradesTableBody && gradesTableBody.offsetParent !== null) {
+                    console.log('[UI] Auto-refreshing grades table from cache...');
+                    // Refresh dari cache (bukan dari server) - instant!
+                    this.loadAndRenderPaginatedGrades(false);
+                }
             },
 
             // Fungsi untuk refresh data grades dari server secara manual
