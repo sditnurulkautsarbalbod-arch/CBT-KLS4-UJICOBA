@@ -3512,16 +3512,36 @@
 
             async recalculateFinalGrade(studentName, examCode) {
                 try {
-                    // Get results from server
-                    const studentResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode }, true);
+                    // OPTIMISTIC: Gunakan cache lokal dulu untuk instant response
+                    let studentResults = [];
+                    const cachedResults = CacheHelper.getCached('results') || [];
+                    studentResults = cachedResults.filter(r => 
+                        r.namaLengkap === studentName && r.kodesoal === examCode
+                    );
+                    
+                    // Fallback ke IndexedDB jika cache kosong
+                    if (studentResults.length === 0) {
+                        const idbResults = await IndexedDBService.getAll('results');
+                        studentResults = idbResults.filter(r => 
+                            r.namaLengkap === studentName && r.kodesoal === examCode
+                        );
+                    }
             
                     if (!studentResults || studentResults.length === 0) {
                         console.warn('No results found for recalculation.');
                         return;
                     }
 
-                    // Fetch total questions from DataService
-                    const questions = await DataService.getQuestions(examCode);
+                    // OPTIMISTIC: Gunakan questions dari cache
+                    let questions = [];
+                    const cachedQuestions = CacheHelper.getCached('questions') || [];
+                    questions = cachedQuestions.filter(q => q.kodesoal === examCode);
+                    
+                    if (questions.length === 0) {
+                        const idbQuestions = await IndexedDBService.getAll('questions');
+                        questions = idbQuestions.filter(q => q.kodesoal === examCode);
+                    }
+                    
                     if (!questions || questions.length === 0) return;
                     const totalQuestionsForExam = questions.length;
 
@@ -3535,14 +3555,22 @@
                     const finalScore = Math.round(totalScore / totalQuestionsForExam);
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    // Find existing grade - read from server
-                    const allGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode }, true);
-                    const existingGrades = allGrades.filter(g => 
+                    // OPTIMISTIC: Cari grade dari cache lokal
+                    let existingGrade = null;
+                    const cachedGrades = CacheHelper.getCached('grades') || [];
+                    existingGrade = cachedGrades.find(g => 
                         g.namaSiswa === studentName && g.kodeSoal === examCode
                     );
+                    
+                    // Fallback ke IndexedDB
+                    if (!existingGrade) {
+                        const idbGrades = await IndexedDBService.getAll('grades');
+                        existingGrade = idbGrades.find(g => 
+                            g.namaSiswa === studentName && g.kodeSoal === examCode
+                        );
+                    }
 
-                    if (existingGrades && existingGrades.length > 0) {
-                        const existingGrade = existingGrades[0];
+                    if (existingGrade) {
                         await DataService.updateGrade({
                             ...existingGrade,
                             gradeId: existingGrade.gradeId,
@@ -3553,9 +3581,7 @@
                             grade: grade,
                             keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
                         });
-                        console.log(`Final grade updated for ${studentName} on exam ${examCode}. New score: ${finalScore}`);
-                        
-                        // Cache sudah diupdate oleh DataService, tidak perlu delete
+                        console.log(`[OPTIMISTIC] Final grade updated for ${studentName} on exam ${examCode}. New score: ${finalScore}`);
                     }
                 } catch (error) {
                     console.error(`Failed to recalculate final grade for ${studentName}:`, error);
@@ -3565,19 +3591,36 @@
             // Synchronous version that updates server directly (for edit operations)
             async recalculateFinalGradeSync(studentName, examCode) {
                 try {
-                    // Read from server - force refresh
-                    const allResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode }, true);
-                    const studentResults = allResults.filter(r => 
+                    // OPTIMISTIC: Gunakan cache lokal dulu untuk instant response
+                    let studentResults = [];
+                    const cachedResults = CacheHelper.getCached('results') || [];
+                    studentResults = cachedResults.filter(r => 
                         r.namaLengkap === studentName && r.kodesoal === examCode
                     );
+                    
+                    // Fallback ke IndexedDB jika cache kosong
+                    if (studentResults.length === 0) {
+                        const idbResults = await IndexedDBService.getAll('results');
+                        studentResults = idbResults.filter(r => 
+                            r.namaLengkap === studentName && r.kodesoal === examCode
+                        );
+                    }
             
                     if (!studentResults || studentResults.length === 0) {
                         console.warn('No results found for recalculation.');
                         return;
                     }
 
-                    // Fetch total questions from DataService
-                    const questions = await DataService.getQuestions(examCode);
+                    // OPTIMISTIC: Gunakan questions dari cache
+                    let questions = [];
+                    const cachedQuestions = CacheHelper.getCached('questions') || [];
+                    questions = cachedQuestions.filter(q => q.kodesoal === examCode);
+                    
+                    if (questions.length === 0) {
+                        const idbQuestions = await IndexedDBService.getAll('questions');
+                        questions = idbQuestions.filter(q => q.kodesoal === examCode);
+                    }
+                    
                     if (!questions || questions.length === 0) return;
                     const totalQuestionsForExam = questions.length;
 
@@ -3591,16 +3634,23 @@
                     const finalScore = Math.round(totalScore / totalQuestionsForExam);
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    // Find existing grade from server - force refresh
-                    const allGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode }, true);
-                    const existingGrades = allGrades.filter(g => 
+                    // OPTIMISTIC: Cari grade dari cache lokal
+                    let existingGrade = null;
+                    const cachedGrades = CacheHelper.getCached('grades') || [];
+                    existingGrade = cachedGrades.find(g => 
                         g.namaSiswa === studentName && g.kodeSoal === examCode
                     );
+                    
+                    // Fallback ke IndexedDB
+                    if (!existingGrade) {
+                        const idbGrades = await IndexedDBService.getAll('grades');
+                        existingGrade = idbGrades.find(g => 
+                            g.namaSiswa === studentName && g.kodeSoal === examCode
+                        );
+                    }
 
-                    if (existingGrades && existingGrades.length > 0) {
-                        const existingGrade = existingGrades[0];
-                        
-                        // Update to SERVER dengan data lengkap
+                    if (existingGrade) {
+                        // Update dengan DataService (sudah optimistic)
                         await DataService.updateGrade({
                             ...existingGrade,
                             gradeId: existingGrade.gradeId,
@@ -3612,24 +3662,43 @@
                             keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
                         });
                         
-                        console.log(`Final grade synced for ${studentName} on exam ${examCode}. New score: ${finalScore}`);
-                        
-                        // Cache sudah diupdate oleh DataService
+                        console.log(`[OPTIMISTIC] Final grade synced for ${studentName} on exam ${examCode}. New score: ${finalScore}`);
                     }
                 } catch (error) {
                     console.error(`Failed to recalculate and sync final grade for ${studentName}:`, error);
                 }
             },
 
-            // Async version for background processing (non-blocking)
+            // Async version for background processing (non-blocking) - FULLY OPTIMISTIC
             async recalculateFinalGradeAsync(studentName, examCode, newNilai) {
                 try {
-                    // Read results from server untuk akurasi
-                    const studentResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode }, true);
+                    // OPTIMISTIC: Gunakan cache lokal dulu untuk instant response
+                    let studentResults = [];
+                    const cachedResults = CacheHelper.getCached('results') || [];
+                    studentResults = cachedResults.filter(r => 
+                        r.namaLengkap === studentName && r.kodesoal === examCode
+                    );
+                    
+                    // Fallback ke IndexedDB jika cache kosong
+                    if (studentResults.length === 0) {
+                        const idbResults = await IndexedDBService.getAll('results');
+                        studentResults = idbResults.filter(r => 
+                            r.namaLengkap === studentName && r.kodesoal === examCode
+                        );
+                    }
             
                     if (!studentResults || studentResults.length === 0) return;
 
-                    const questions = await DataService.getQuestions(examCode);
+                    // OPTIMISTIC: Gunakan questions dari cache
+                    let questions = [];
+                    const cachedQuestions = CacheHelper.getCached('questions') || [];
+                    questions = cachedQuestions.filter(q => q.kodesoal === examCode);
+                    
+                    if (questions.length === 0) {
+                        const idbQuestions = await IndexedDBService.getAll('questions');
+                        questions = idbQuestions.filter(q => q.kodesoal === examCode);
+                    }
+                    
                     if (!questions || questions.length === 0) return;
                     const totalQuestionsForExam = questions.length;
 
@@ -3643,17 +3712,17 @@
                     const finalScore = Math.round(totalScore / totalQuestionsForExam);
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    // PENTING: Cari grade dari cache GLOBAL dulu, bukan dari server dengan filter
+                    // OPTIMISTIC: Cari grade dari cache lokal
                     let existingGrade = null;
-                    const globalGrades = CacheHelper.getCached('grades') || [];
-                    existingGrade = globalGrades.find(g => 
+                    const cachedGrades = CacheHelper.getCached('grades') || [];
+                    existingGrade = cachedGrades.find(g => 
                         g.namaSiswa === studentName && g.kodeSoal === examCode
                     );
                     
-                    // Jika tidak ditemukan di cache, fetch dari server
+                    // Fallback ke IndexedDB (bukan server)
                     if (!existingGrade) {
-                        const serverGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode }, true);
-                        existingGrade = serverGrades.find(g => 
+                        const idbGrades = await IndexedDBService.getAll('grades');
+                        existingGrade = idbGrades.find(g => 
                             g.namaSiswa === studentName && g.kodeSoal === examCode
                         );
                     }
@@ -3671,9 +3740,9 @@
                             keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
                         });
                         
-                        console.log(`[Grade Sync] Updated ${studentName}: ${finalScore} (${grade})`);
+                        console.log(`[OPTIMISTIC] Updated ${studentName}: ${finalScore} (${grade})`);
                     } else {
-                        console.warn(`[Grade Sync] No existing grade found for ${studentName} on ${examCode}`);
+                        console.warn(`[OPTIMISTIC] No existing grade found for ${studentName} on ${examCode}`);
                     }
                 } catch (error) {
                     console.error(`Failed to recalculate grade async for ${studentName}:`, error);
