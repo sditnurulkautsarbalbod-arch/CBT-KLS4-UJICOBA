@@ -933,7 +933,10 @@
                         case 'add':
                             return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
                         case 'addBatch':
-                            // Untuk batch operations (seperti addResults dengan array)
+                            // Untuk results, GAS expects 'addResults' (plural), bukan 'addResult'
+                            if (storeName === 'results') {
+                                return await callGoogleScript('POST', { action: 'addResults', data: data });
+                            }
                             return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
                         case 'addQuestionsBatch':
                             // Special case: GAS expects 'addQuestionsBatch' action name
