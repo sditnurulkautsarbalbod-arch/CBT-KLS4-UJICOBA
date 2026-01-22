@@ -3211,11 +3211,13 @@
                     const resultId = form.id.value;
                     const newNilai = parseInt(form.nilai.value);
                     const newStatus = newNilai > 0 ? 'benar' : 'salah';
+                    const oldNilai = result.nilai || 0;
                     
                     // OPTIMISTIC UI: Close modal immediately
                     UI.hideModal();
                     
-                    // PENTING: Update GLOBAL cache 'results' agar recalculate bisa baca data terbaru
+                    // === STEP 1: Update Results Cache ===
+                    // Update GLOBAL cache 'results'
                     const globalResults = CacheHelper.getCached('results') || [];
                     const globalIdx = globalResults.findIndex(r => r.resultId === resultId);
                     if (globalIdx !== -1) {
@@ -3240,26 +3242,94 @@
                         IndexedDBService.put('results', idbResult);
                     }
                     
-                    // Refresh UI Hasil Ujian instantly (from updated cache)
+                    // Refresh UI Hasil Ujian instantly
                     document.getElementById('applyResultFilterBtn').click();
                     
-                    // OPTIMISTIC: Recalculate grade SEGERA (tidak menunggu server)
-                    // Data sudah ada di cache, jadi ini akan instant
-                    this.recalculateFinalGradeAsync(result.namaLengkap, result.kodesoal, newNilai);
+                    // === STEP 2: LANGSUNG UPDATE GRADE DI CACHE (tanpa recalculate kompleks) ===
+                    try {
+                        const studentName = result.namaLengkap;
+                        const examCode = result.kodesoal;
+                        
+                        // Hitung total score dari ALL results di cache
+                        const allStudentResults = globalResults.filter(r => 
+                            r.namaLengkap === studentName && r.kodesoal === examCode
+                        );
+                        
+                        // Get total questions dari cache
+                        const cachedQuestions = CacheHelper.getCached('questions') || [];
+                        const examQuestions = cachedQuestions.filter(q => q.kodesoal === examCode);
+                        const totalQuestions = examQuestions.length || allStudentResults.length;
+                        
+                        // Calculate new score
+                        let totalScore = 0;
+                        allStudentResults.forEach(r => {
+                            if (r.status !== 'perlu dinilai') {
+                                totalScore += Number(r.nilai) || 0;
+                            }
+                        });
+                        
+                        const finalScore = Math.round(totalScore / totalQuestions);
+                        const gradeValue = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
+                        const keterangan = finalScore >= 70 ? 'Lulus' : 'Tidak Lulus';
+                        
+                        // LANGSUNG update grades di GLOBAL cache
+                        const globalGrades = CacheHelper.getCached('grades') || [];
+                        const gradeIdx = globalGrades.findIndex(g => 
+                            g.namaSiswa === studentName && g.kodeSoal === examCode
+                        );
+                        
+                        if (gradeIdx !== -1) {
+                            // Update existing grade
+                            globalGrades[gradeIdx].nilai = finalScore;
+                            globalGrades[gradeIdx].grade = gradeValue;
+                            globalGrades[gradeIdx].keterangan = keterangan;
+                            
+                            // Set ke global cache
+                            AppState.cache.set('grades', { data: globalGrades, timestamp: Date.now(), valid: true });
+                            
+                            // Clear filtered grades cache
+                            Object.keys(AppState.cache._data).forEach(key => {
+                                if (typeof key === 'string' && key.startsWith('grades_')) {
+                                    delete AppState.cache._data[key];
+                                }
+                            });
+                            
+                            // Update IndexedDB
+                            IndexedDBService.put('grades', globalGrades[gradeIdx]);
+                            
+                            // Queue for background sync
+                            BackgroundSync.queueOperation('update', 'grades', {
+                                ...globalGrades[gradeIdx],
+                                gradeId: globalGrades[gradeIdx].gradeId,
+                                namaSiswa: studentName,
+                                kodeSoal: examCode
+                            });
+                            
+                            console.log(`[INSTANT SYNC] Grade updated: ${studentName} = ${finalScore} (${gradeValue})`);
+                        }
+                        
+                        // FORCE refresh UI Daftar Nilai
+                        if (typeof UI !== 'undefined' && typeof UI.refreshGradesUIIfVisible === 'function') {
+                            setTimeout(() => UI.refreshGradesUIIfVisible(), 50);
+                        }
+                        
+                    } catch (gradeError) {
+                        console.error('[Grade Sync Error]:', gradeError);
+                    }
                     
-                    // BACKGROUND: Sync to server (fire and forget)
+                    // === STEP 3: BACKGROUND Sync to server ===
                     callGoogleScript('POST', {
                         action: 'updateResult',
                         data: { resultId: resultId, nilai: newNilai, status: newStatus }
                     }).then(response => {
                         if (response.status === 'success') {
-                            console.log('[Sync] Result updated on server');
+                            console.log('[Server Sync] Result updated on server');
                         } else {
-                            console.error('[Sync] Failed:', response.message);
+                            console.error('[Server Sync] Failed:', response.message);
                             UI.showNotification('Gagal sync ke server', 'warning');
                         }
                     }).catch(err => {
-                        console.error('[Sync] Error:', err);
+                        console.error('[Server Sync] Error:', err);
                         UI.showNotification('Gagal sync ke server', 'warning');
                     });
                 });
