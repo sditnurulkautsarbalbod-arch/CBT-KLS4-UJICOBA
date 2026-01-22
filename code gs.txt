@@ -270,16 +270,37 @@ function updateResultsBatch(updates) {
   
   var nilaiColIndex = headers.indexOf('nilai');
   var statusColIndex = headers.indexOf('status');
+  var namaLengkapColIndex = headers.indexOf('namaLengkap');
+  var kodesoalColIndex = headers.indexOf('kodesoal');
+  
+  // Track which student-exam combinations need grade recalculation
+  var studentsToRecalculate = {};
 
   updates.forEach(function(update) {
     var rowIndex = idToRowMap[update.resultId];
     if (rowIndex !== undefined) {
       if (nilaiColIndex > -1) data[rowIndex][nilaiColIndex] = update.nilai;
       if (statusColIndex > -1) data[rowIndex][statusColIndex] = update.status;
+      
+      // Mark for grade recalculation
+      var studentName = data[rowIndex][namaLengkapColIndex];
+      var examCode = data[rowIndex][kodesoalColIndex];
+      if (studentName && examCode) {
+        studentsToRecalculate[studentName + '|' + examCode] = {
+          namaLengkap: studentName,
+          kodesoal: examCode
+        };
+      }
     }
   });
   
   sheet.getRange(1, 1, data.length, data[0].length).setValues(data);
+  
+  // Auto-recalculate grades for affected students
+  for (var key in studentsToRecalculate) {
+    var student = studentsToRecalculate[key];
+    recalculateStudentGrade(student.namaLengkap, student.kodesoal);
+  }
 }
 
 function deleteResultsBatch(resultIds) {
@@ -494,12 +515,23 @@ function updateGrade(gradeData) {
   var gradeIdColIndex = headers.indexOf('gradeId');
   if (gradeIdColIndex === -1) return;
   
+  // Cari berdasarkan gradeId ATAU kombinasi namaSiswa + kodeSoal untuk memastikan match
+  var searchGradeId = gradeData.gradeId || gradeData.id;
+  var namaSiswaColIndex = headers.indexOf('namaSiswa');
+  var kodeSoalColIndex = headers.indexOf('kodeSoal');
+  
   for (var i = 1; i < data.length; i++) {
-    if (data[i][gradeIdColIndex] === gradeData.gradeId) {
+    var matchById = data[i][gradeIdColIndex] === searchGradeId;
+    var matchByNameAndCode = (namaSiswaColIndex > -1 && kodeSoalColIndex > -1) &&
+                              (data[i][namaSiswaColIndex] === gradeData.namaSiswa && 
+                               data[i][kodeSoalColIndex] === gradeData.kodeSoal);
+    
+    if (matchById || matchByNameAndCode) {
       var newRow = headers.map(function(header, index) {
         return gradeData[header] !== undefined ? gradeData[header] : data[i][index];
       });
       sheet.getRange(i + 1, 1, 1, headers.length).setValues([newRow]);
+      Logger.log('Grade updated for: ' + gradeData.namaSiswa + ' - ' + gradeData.kodeSoal);
       break;
     }
   }
@@ -675,29 +707,42 @@ function recalculateStudentGrade(studentName, examCode) {
   // Get all results for this student and exam
   var results = getResults({ namaLengkap: studentName, kodesoal: examCode });
   
-  if (results.length === 0) return null;
+  if (results.length === 0) {
+    Logger.log('No results found for: ' + studentName + ' - ' + examCode);
+    return null;
+  }
   
-  // Calculate total score
+  // Calculate total score (skip 'perlu dinilai' status)
   var totalScore = 0;
+  var countedResults = 0;
   results.forEach(function(r) {
-    totalScore += Number(r.nilai) || 0;
+    if (r.status !== 'perlu dinilai') {
+      totalScore += Number(r.nilai) || 0;
+      countedResults++;
+    }
   });
   
+  // Use total results count for average (not just counted ones)
   var finalScore = Math.round(totalScore / results.length);
   var grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
   var keterangan = finalScore >= 70 ? 'Lulus' : 'Tidak Lulus';
   
-  // Find and update existing grade or return data for new grade
+  // Find and update existing grade
   var existingGrades = getGrades({ namaSiswa: studentName, kodeSoal: examCode });
   
   if (existingGrades.length > 0) {
     var gradeToUpdate = existingGrades[0];
     updateGrade({
       gradeId: gradeToUpdate.gradeId,
+      namaSiswa: studentName,
+      kodeSoal: examCode,
       nilai: finalScore,
       grade: grade,
       keterangan: keterangan
     });
+    Logger.log('Grade recalculated for: ' + studentName + ' - ' + examCode + ' => ' + finalScore + ' (' + grade + ')');
+  } else {
+    Logger.log('No existing grade found for: ' + studentName + ' - ' + examCode);
   }
   
   return {

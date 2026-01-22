@@ -1491,17 +1491,23 @@
             
             async updateGrade(gradeData) {
                 const cached = CacheHelper.getCached('grades') || [];
-                // Cari dengan id ATAU gradeId (untuk kompatibilitas)
+                // Cari dengan id ATAU gradeId ATAU kombinasi namaSiswa+kodeSoal
                 const index = cached.findIndex(g => 
                     g.id === gradeData.id || 
                     g.id === gradeData.gradeId || 
                     g.gradeId === gradeData.gradeId ||
-                    g.gradeId === gradeData.id
+                    g.gradeId === gradeData.id ||
+                    (gradeData.namaSiswa && gradeData.kodeSoal && 
+                     g.namaSiswa === gradeData.namaSiswa && g.kodeSoal === gradeData.kodeSoal)
                 );
                 let updatedGrade = gradeData;
                 
                 if (index !== -1) {
+                    // Merge dengan data existing untuk memastikan semua field tersedia
                     updatedGrade = { ...cached[index], ...gradeData };
+                    // Pastikan gradeId konsisten
+                    updatedGrade.gradeId = updatedGrade.gradeId || cached[index].gradeId;
+                    updatedGrade.id = updatedGrade.id || updatedGrade.gradeId;
                     cached[index] = updatedGrade;
                 } else {
                     // Jika tidak ditemukan, tambahkan sebagai baru
@@ -1513,18 +1519,23 @@
                 AppState.cache.set('grades', { data: cached, timestamp: Date.now(), valid: true });
                 
                 // PENTING: Clear semua filtered cache untuk grades agar data konsisten
-                // Ini akan memaksa loadAndRenderPaginatedGrades untuk fetch dari cache global
-                AppState.cache._data.forEach((value, key) => {
+                Object.keys(AppState.cache._data).forEach(key => {
                     if (typeof key === 'string' && key.startsWith('grades_')) {
-                        AppState.cache.delete(key);
+                        delete AppState.cache._data[key];
                     }
                 });
                 
                 // Update IndexedDB
                 await IndexedDBService.put('grades', updatedGrade);
                 
-                // Enqueue for background sync
-                await BackgroundSync.queueOperation('update', 'grades', updatedGrade);
+                // Enqueue for background sync - pastikan gradeId, namaSiswa, kodeSoal ada
+                const syncData = {
+                    ...updatedGrade,
+                    gradeId: updatedGrade.gradeId,
+                    namaSiswa: updatedGrade.namaSiswa,
+                    kodeSoal: updatedGrade.kodeSoal
+                };
+                await BackgroundSync.queueOperation('update', 'grades', syncData);
                 
                 // TRIGGER: Auto-refresh UI Daftar Nilai jika sedang terbuka
                 if (typeof UI !== 'undefined' && typeof UI.refreshGradesUIIfVisible === 'function') {
@@ -3502,7 +3513,7 @@
             async recalculateFinalGrade(studentName, examCode) {
                 try {
                     // Get results from server
-                    const studentResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode });
+                    const studentResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode }, true);
             
                     if (!studentResults || studentResults.length === 0) {
                         console.warn('No results found for recalculation.');
@@ -3525,7 +3536,7 @@
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
                     // Find existing grade - read from server
-                    const allGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode });
+                    const allGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode }, true);
                     const existingGrades = allGrades.filter(g => 
                         g.namaSiswa === studentName && g.kodeSoal === examCode
                     );
@@ -3533,8 +3544,11 @@
                     if (existingGrades && existingGrades.length > 0) {
                         const existingGrade = existingGrades[0];
                         await DataService.updateGrade({
+                            ...existingGrade,
                             gradeId: existingGrade.gradeId,
                             id: existingGrade.id || existingGrade.gradeId,
+                            namaSiswa: studentName,
+                            kodeSoal: examCode,
                             nilai: finalScore,
                             grade: grade,
                             keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
@@ -3551,8 +3565,8 @@
             // Synchronous version that updates server directly (for edit operations)
             async recalculateFinalGradeSync(studentName, examCode) {
                 try {
-                    // Read from server
-                    const allResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode });
+                    // Read from server - force refresh
+                    const allResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode }, true);
                     const studentResults = allResults.filter(r => 
                         r.namaLengkap === studentName && r.kodesoal === examCode
                     );
@@ -3577,8 +3591,8 @@
                     const finalScore = Math.round(totalScore / totalQuestionsForExam);
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    // Find existing grade from server
-                    const allGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode });
+                    // Find existing grade from server - force refresh
+                    const allGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode }, true);
                     const existingGrades = allGrades.filter(g => 
                         g.namaSiswa === studentName && g.kodeSoal === examCode
                     );
@@ -3586,10 +3600,13 @@
                     if (existingGrades && existingGrades.length > 0) {
                         const existingGrade = existingGrades[0];
                         
-                        // Update to SERVER
+                        // Update to SERVER dengan data lengkap
                         await DataService.updateGrade({
+                            ...existingGrade,
                             gradeId: existingGrade.gradeId,
                             id: existingGrade.id || existingGrade.gradeId,
+                            namaSiswa: studentName,
+                            kodeSoal: examCode,
                             nilai: finalScore,
                             grade: grade,
                             keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
@@ -3607,8 +3624,8 @@
             // Async version for background processing (non-blocking)
             async recalculateFinalGradeAsync(studentName, examCode, newNilai) {
                 try {
-                    // Read from server
-                    const studentResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode });
+                    // Read results from server untuk akurasi
+                    const studentResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode }, true);
             
                     if (!studentResults || studentResults.length === 0) return;
 
@@ -3626,25 +3643,37 @@
                     const finalScore = Math.round(totalScore / totalQuestionsForExam);
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    const allGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode });
-                    const existingGrades = allGrades.filter(g => 
+                    // PENTING: Cari grade dari cache GLOBAL dulu, bukan dari server dengan filter
+                    let existingGrade = null;
+                    const globalGrades = CacheHelper.getCached('grades') || [];
+                    existingGrade = globalGrades.find(g => 
                         g.namaSiswa === studentName && g.kodeSoal === examCode
                     );
+                    
+                    // Jika tidak ditemukan di cache, fetch dari server
+                    if (!existingGrade) {
+                        const serverGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode }, true);
+                        existingGrade = serverGrades.find(g => 
+                            g.namaSiswa === studentName && g.kodeSoal === examCode
+                        );
+                    }
 
-                    if (existingGrades && existingGrades.length > 0) {
-                        const existingGrade = existingGrades[0];
-                        
-                        // Update grade to server
+                    if (existingGrade) {
+                        // Update grade dengan data lengkap - PASTIKAN namaSiswa dan kodeSoal dikirim
                         await DataService.updateGrade({
+                            ...existingGrade,  // Include semua field existing
                             gradeId: existingGrade.gradeId,
                             id: existingGrade.id || existingGrade.gradeId,
+                            namaSiswa: studentName,
+                            kodeSoal: examCode,
                             nilai: finalScore,
                             grade: grade,
                             keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
                         });
                         
-                        // Cache sudah diupdate oleh DataService
-                        console.log(`Grade synced for ${studentName}: ${finalScore}`);
+                        console.log(`[Grade Sync] Updated ${studentName}: ${finalScore} (${grade})`);
+                    } else {
+                        console.warn(`[Grade Sync] No existing grade found for ${studentName} on ${examCode}`);
                     }
                 } catch (error) {
                     console.error(`Failed to recalculate grade async for ${studentName}:`, error);
