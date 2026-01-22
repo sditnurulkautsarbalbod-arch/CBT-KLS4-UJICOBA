@@ -390,7 +390,17 @@ function addQuestionsBatch(questionsData) {
       if (Array.isArray(q.pilihan)) {
           q.pilihan = JSON.stringify(q.pilihan);
       }
-      return headers.map(function(header) { return q[header] !== undefined ? q[header] : ''; });
+      
+      return headers.map(function(header) { 
+        var value = q[header] !== undefined ? q[header] : '';
+        
+        // Tambah apostrophe untuk jawabanBenar agar tidak auto-convert ke tanggal
+        if (header === 'jawabanBenar' && value !== '') {
+          return "'" + value;
+        }
+        
+        return value;
+      });
   });
   if (rowsToAdd.length > 0) {
     sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAdd.length, headers.length).setValues(rowsToAdd);
@@ -434,7 +444,14 @@ function updateQuestion(questionData) {
         }
         
         var newRow = headers.map(function(header, index) {
-            return questionData[header] !== undefined ? questionData[header] : values[rowIndexToUpdate - 1][index];
+            var value = questionData[header] !== undefined ? questionData[header] : values[rowIndexToUpdate - 1][index];
+            
+            // Tambah apostrophe untuk jawabanBenar agar tidak auto-convert ke tanggal
+            if (header === 'jawabanBenar' && value !== '' && typeof value === 'string' && !value.startsWith("'")) {
+              return "'" + value;
+            }
+            
+            return value;
         });
         
         sheet.getRange(rowIndexToUpdate, 1, 1, headers.length).setValues([newRow]);

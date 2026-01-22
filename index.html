@@ -3212,90 +3212,120 @@
                     const newNilai = parseInt(form.nilai.value);
                     const newStatus = newNilai > 0 ? 'benar' : 'salah';
                     const oldNilai = result.nilai || 0;
+                    const studentName = result.namaLengkap;
+                    const examCode = result.kodesoal;
                     
                     // OPTIMISTIC UI: Close modal immediately
                     UI.hideModal();
                     
-                    // === STEP 1: Update Results Cache ===
-                    // Update GLOBAL cache 'results'
-                    const globalResults = CacheHelper.getCached('results') || [];
-                    const globalIdx = globalResults.findIndex(r => r.resultId === resultId);
-                    if (globalIdx !== -1) {
-                        globalResults[globalIdx].nilai = newNilai;
-                        globalResults[globalIdx].status = newStatus;
-                        AppState.cache.set('results', { data: globalResults, timestamp: Date.now(), valid: true });
-                    }
-                    
-                    // Update filtered cache juga untuk UI results
-                    const cachedResults = AppState.cache.get(cacheKey);
-                    if (cachedResults) {
-                        const idx = cachedResults.findIndex(r => r.resultId === resultId);
-                        if (idx !== -1) {
-                            cachedResults[idx].nilai = newNilai;
-                            cachedResults[idx].status = newStatus;
+                    // === STEP 1: Update UI Hasil Ujian LANGSUNG via DOM ===
+                    const resultRow = document.querySelector(`tr[data-result-id="${resultId}"]`);
+                    if (resultRow) {
+                        const nilaiCell = resultRow.querySelector('.result-nilai');
+                        const statusCell = resultRow.querySelector('.result-status');
+                        if (nilaiCell) nilaiCell.textContent = newNilai;
+                        if (statusCell) {
+                            statusCell.textContent = newStatus;
+                            statusCell.className = `result-status px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${newStatus === 'benar' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`;
                         }
                     }
                     
-                    // Update IndexedDB untuk persistence
-                    const idbResult = globalResults.find(r => r.resultId === resultId);
-                    if (idbResult) {
-                        IndexedDBService.put('results', idbResult);
-                    }
+                    // === STEP 2: Hitung ulang grade dan update UI Daftar Nilai LANGSUNG via DOM ===
+                    // Ambil semua results dari tabel yang sedang ditampilkan
+                    const allResultRows = document.querySelectorAll('#resultsTableBody tr[data-result-id]');
+                    let totalScore = 0;
+                    let countResults = 0;
                     
-                    // Refresh UI Hasil Ujian instantly
-                    document.getElementById('applyResultFilterBtn').click();
+                    allResultRows.forEach(row => {
+                        const rowStudent = row.getAttribute('data-student');
+                        const rowExam = row.getAttribute('data-exam');
+                        if (rowStudent === studentName && rowExam === examCode) {
+                            const nilaiCell = row.querySelector('.result-nilai');
+                            const statusCell = row.querySelector('.result-status');
+                            const nilai = parseInt(nilaiCell?.textContent) || 0;
+                            const status = statusCell?.textContent?.trim();
+                            
+                            if (status !== 'perlu dinilai') {
+                                totalScore += nilai;
+                            }
+                            countResults++;
+                        }
+                    });
                     
-                    // === STEP 2: LANGSUNG UPDATE GRADE DI CACHE (tanpa recalculate kompleks) ===
-                    try {
-                        const studentName = result.namaLengkap;
-                        const examCode = result.kodesoal;
-                        
-                        // Hitung total score dari ALL results di cache
-                        const allStudentResults = globalResults.filter(r => 
-                            r.namaLengkap === studentName && r.kodesoal === examCode
-                        );
-                        
-                        // Get total questions dari cache
-                        const cachedQuestions = CacheHelper.getCached('questions') || [];
-                        const examQuestions = cachedQuestions.filter(q => q.kodesoal === examCode);
-                        const totalQuestions = examQuestions.length || allStudentResults.length;
-                        
-                        // Calculate new score
-                        let totalScore = 0;
-                        allStudentResults.forEach(r => {
-                            if (r.status !== 'perlu dinilai') {
-                                totalScore += Number(r.nilai) || 0;
+                    // Jika tidak ada di DOM, gunakan cache
+                    if (countResults === 0) {
+                        const cachedResults = AppState.cache.get(cacheKey) || [];
+                        cachedResults.forEach(r => {
+                            if (r.namaLengkap === studentName && r.kodesoal === examCode) {
+                                // Update nilai jika ini adalah result yang diedit
+                                const nilai = (r.resultId === resultId) ? newNilai : (Number(r.nilai) || 0);
+                                const status = (r.resultId === resultId) ? newStatus : r.status;
+                                if (status !== 'perlu dinilai') {
+                                    totalScore += nilai;
+                                }
+                                countResults++;
                             }
                         });
+                    }
+                    
+                    // Get total questions
+                    const cachedQuestions = CacheHelper.getCached('questions') || [];
+                    const examQuestions = cachedQuestions.filter(q => q.kodesoal === examCode);
+                    const totalQuestions = examQuestions.length || countResults || 1;
+                    
+                    // Calculate final grade
+                    const finalScore = Math.round(totalScore / totalQuestions);
+                    const gradeValue = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
+                    const keterangan = finalScore >= 70 ? 'Lulus' : 'Tidak Lulus';
+                    
+                    // UPDATE DOM Daftar Nilai LANGSUNG
+                    const gradeRow = document.querySelector(`tr[data-student="${studentName}"][data-exam="${examCode}"]`);
+                    if (gradeRow) {
+                        const nilaiCell = gradeRow.querySelector('.grade-nilai');
+                        const gradeCell = gradeRow.querySelector('.grade-grade');
+                        const ketCell = gradeRow.querySelector('.grade-keterangan');
                         
-                        const finalScore = Math.round(totalScore / totalQuestions);
-                        const gradeValue = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
-                        const keterangan = finalScore >= 70 ? 'Lulus' : 'Tidak Lulus';
+                        if (nilaiCell) nilaiCell.textContent = finalScore;
+                        if (gradeCell) {
+                            const gradeClass = gradeValue === 'A' ? 'bg-green-100 text-green-800' : 
+                                              gradeValue === 'B' ? 'bg-blue-100 text-blue-800' : 
+                                              gradeValue === 'C' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800';
+                            gradeCell.innerHTML = `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${gradeClass}">${gradeValue}</span>`;
+                        }
+                        if (ketCell) ketCell.textContent = keterangan;
                         
-                        // LANGSUNG update grades di GLOBAL cache
+                        console.log(`[DOM UPDATE] Grade di tabel: ${studentName} = ${finalScore} (${gradeValue})`);
+                    }
+                    
+                    // === STEP 3: Update Cache untuk konsistensi ===
+                    try {
+                        // Update results cache
+                        const globalResults = CacheHelper.getCached('results') || [];
+                        const globalIdx = globalResults.findIndex(r => r.resultId === resultId);
+                        if (globalIdx !== -1) {
+                            globalResults[globalIdx].nilai = newNilai;
+                            globalResults[globalIdx].status = newStatus;
+                            AppState.cache.set('results', { data: globalResults, timestamp: Date.now(), valid: true });
+                        }
+                        
+                        // Update filtered results cache
+                        const cachedResultsFiltered = AppState.cache.get(cacheKey);
+                        if (cachedResultsFiltered) {
+                            const idx = cachedResultsFiltered.findIndex(r => r.resultId === resultId);
+                            if (idx !== -1) {
+                                cachedResultsFiltered[idx].nilai = newNilai;
+                                cachedResultsFiltered[idx].status = newStatus;
+                            }
+                        }
+                        
+                        // Update grades cache
                         const globalGrades = CacheHelper.getCached('grades') || [];
-                        const gradeIdx = globalGrades.findIndex(g => 
-                            g.namaSiswa === studentName && g.kodeSoal === examCode
-                        );
-                        
+                        const gradeIdx = globalGrades.findIndex(g => g.namaSiswa === studentName && g.kodeSoal === examCode);
                         if (gradeIdx !== -1) {
-                            // Update existing grade
                             globalGrades[gradeIdx].nilai = finalScore;
                             globalGrades[gradeIdx].grade = gradeValue;
                             globalGrades[gradeIdx].keterangan = keterangan;
-                            
-                            // Set ke global cache
                             AppState.cache.set('grades', { data: globalGrades, timestamp: Date.now(), valid: true });
-                            
-                            // Clear filtered grades cache
-                            Object.keys(AppState.cache._data).forEach(key => {
-                                if (typeof key === 'string' && key.startsWith('grades_')) {
-                                    delete AppState.cache._data[key];
-                                }
-                            });
-                            
-                            // Update IndexedDB
-                            IndexedDBService.put('grades', globalGrades[gradeIdx]);
                             
                             // Queue for background sync
                             BackgroundSync.queueOperation('update', 'grades', {
@@ -3304,20 +3334,12 @@
                                 namaSiswa: studentName,
                                 kodeSoal: examCode
                             });
-                            
-                            console.log(`[INSTANT SYNC] Grade updated: ${studentName} = ${finalScore} (${gradeValue})`);
                         }
-                        
-                        // FORCE refresh UI Daftar Nilai
-                        if (typeof UI !== 'undefined' && typeof UI.refreshGradesUIIfVisible === 'function') {
-                            setTimeout(() => UI.refreshGradesUIIfVisible(), 50);
-                        }
-                        
-                    } catch (gradeError) {
-                        console.error('[Grade Sync Error]:', gradeError);
+                    } catch (cacheError) {
+                        console.warn('[Cache Update] Warning:', cacheError);
                     }
                     
-                    // === STEP 3: BACKGROUND Sync to server ===
+                    // === STEP 4: BACKGROUND Sync result to server ===
                     callGoogleScript('POST', {
                         action: 'updateResult',
                         data: { resultId: resultId, nilai: newNilai, status: newStatus }
@@ -3330,7 +3352,6 @@
                         }
                     }).catch(err => {
                         console.error('[Server Sync] Error:', err);
-                        UI.showNotification('Gagal sync ke server', 'warning');
                     });
                 });
             },
@@ -3401,7 +3422,7 @@
                             `;
                         }
                         return `
-                        <tr>
+                        <tr data-result-id="${resultId}" data-student="${result.namaLengkap}" data-exam="${result.kodesoal}">
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${index + 1 + (AppState.pagination.results.currentPage - 1) * AppState.itemsPerPage}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${result.kelas}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${result.kodesoal}</td>
@@ -3410,9 +3431,9 @@
                             <td class="px-6 py-4 text-sm text-gray-900 max-w-xs truncate">${result.pertanyaan}</td>
                             <td class="px-6 py-4 text-sm text-gray-900 max-w-xs truncate">${result.jawabanSiswa}</td>
                             <td class="px-6 py-4 whitespace-nowrap">
-                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${result.status === 'benar' ? 'bg-green-100 text-green-800' : result.status === 'salah' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}">${result.status}</span>
+                                <span class="result-status px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${result.status === 'benar' ? 'bg-green-100 text-green-800' : result.status === 'salah' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}">${result.status}</span>
                             </td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${result.nilai}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 result-nilai">${result.nilai}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
                                 ${actionButtons}
                             </td>
@@ -3965,17 +3986,17 @@
                 gradesTableBody.innerHTML = grades.length === 0 ?
                     '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500">Belum ada data nilai yang sesuai dengan filter</td></tr>' :
                     grades.map((grade, index) => `
-                        <tr>
+                        <tr data-grade-id="${grade.gradeId}" data-student="${grade.namaSiswa}" data-exam="${grade.kodeSoal}">
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${index + 1 + (AppState.pagination.grades.currentPage - 1) * AppState.itemsPerPage}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.kelas}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.namaSiswa}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.kodeSoal}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.mataPelajaran}</td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.nilai}</td>
-                            <td class="px-6 py-4 whitespace-nowrap">
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 grade-nilai">${grade.nilai}</td>
+                            <td class="px-6 py-4 whitespace-nowrap grade-grade">
                                 <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${grade.grade === 'A' ? 'bg-green-100 text-green-800' : grade.grade === 'B' ? 'bg-blue-100 text-blue-800' : grade.grade === 'C' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}">${grade.grade}</span>
                             </td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.keterangan}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 grade-keterangan">${grade.keterangan}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.waktuSelesai}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
                                 <button onclick="Management.viewGrade('${grade.gradeId}')" class="text-blue-600 hover:text-blue-900 mr-3">
