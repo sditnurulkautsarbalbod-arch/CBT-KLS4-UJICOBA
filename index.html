@@ -3212,10 +3212,19 @@
                     const newNilai = parseInt(form.nilai.value);
                     const newStatus = newNilai > 0 ? 'benar' : 'salah';
                     
-                    // OPTIMISTIC UI: Close modal & update UI immediately
+                    // OPTIMISTIC UI: Close modal immediately
                     UI.hideModal();
                     
-                    // Update cache immediately for instant UI
+                    // PENTING: Update GLOBAL cache 'results' agar recalculate bisa baca data terbaru
+                    const globalResults = CacheHelper.getCached('results') || [];
+                    const globalIdx = globalResults.findIndex(r => r.resultId === resultId);
+                    if (globalIdx !== -1) {
+                        globalResults[globalIdx].nilai = newNilai;
+                        globalResults[globalIdx].status = newStatus;
+                        AppState.cache.set('results', { data: globalResults, timestamp: Date.now(), valid: true });
+                    }
+                    
+                    // Update filtered cache juga untuk UI results
                     const cachedResults = AppState.cache.get(cacheKey);
                     if (cachedResults) {
                         const idx = cachedResults.findIndex(r => r.resultId === resultId);
@@ -3225,8 +3234,18 @@
                         }
                     }
                     
-                    // Refresh UI instantly (from updated cache)
+                    // Update IndexedDB untuk persistence
+                    const idbResult = globalResults.find(r => r.resultId === resultId);
+                    if (idbResult) {
+                        IndexedDBService.put('results', idbResult);
+                    }
+                    
+                    // Refresh UI Hasil Ujian instantly (from updated cache)
                     document.getElementById('applyResultFilterBtn').click();
+                    
+                    // OPTIMISTIC: Recalculate grade SEGERA (tidak menunggu server)
+                    // Data sudah ada di cache, jadi ini akan instant
+                    this.recalculateFinalGradeAsync(result.namaLengkap, result.kodesoal, newNilai);
                     
                     // BACKGROUND: Sync to server (fire and forget)
                     callGoogleScript('POST', {
@@ -3235,8 +3254,6 @@
                     }).then(response => {
                         if (response.status === 'success') {
                             console.log('[Sync] Result updated on server');
-                            // Recalculate grade in background
-                            this.recalculateFinalGradeAsync(result.namaLengkap, result.kodesoal, newNilai);
                         } else {
                             console.error('[Sync] Failed:', response.message);
                             UI.showNotification('Gagal sync ke server', 'warning');
@@ -3741,6 +3758,11 @@
                         });
                         
                         console.log(`[OPTIMISTIC] Updated ${studentName}: ${finalScore} (${grade})`);
+                        
+                        // PENTING: Force refresh UI Daftar Nilai
+                        if (typeof UI !== 'undefined' && typeof UI.refreshGradesUIIfVisible === 'function') {
+                            UI.refreshGradesUIIfVisible();
+                        }
                     } else {
                         console.warn(`[OPTIMISTIC] No existing grade found for ${studentName} on ${examCode}`);
                     }
