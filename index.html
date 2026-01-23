@@ -6153,7 +6153,21 @@
                             return true;
                         });
                         
-                        filteredResults.sort((a, b) => a.noSoal - b.noSoal);
+                        // Sort by: mataPelajaran, namaLengkap, noSoal
+                        filteredResults.sort((a, b) => {
+                            // 1. Sort by mataPelajaran
+                            const mataPelajaranCompare = (a.mataPelajaran || '').localeCompare(b.mataPelajaran || '', 'id-ID');
+                            if (mataPelajaranCompare !== 0) return mataPelajaranCompare;
+                            
+                            // 2. Sort by namaLengkap
+                            const namaCompare = (a.namaLengkap || '').localeCompare(b.namaLengkap || '', 'id-ID');
+                            if (namaCompare !== 0) return namaCompare;
+                            
+                            // 3. Sort by noSoal (numeric)
+                            const noSoalA = parseInt(a.noSoal) || 0;
+                            const noSoalB = parseInt(b.noSoal) || 0;
+                            return noSoalA - noSoalB;
+                        });
                         AppState.cache.set(cacheKey, filteredResults);
                         
                         this.renderResultsFromCache(filteredResults);
