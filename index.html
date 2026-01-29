@@ -6114,7 +6114,7 @@
                             filteredQuestions = filteredQuestions.filter(q => q.kelas && q.kelas.startsWith(teacherGrade));
                         }
                         
-                        // Sort by: 1. Mata Pelajaran, 2. Tipe (PG → Isian/Essai → Uraian), 3. Creation time
+                        // Sort by: 1. Mata Pelajaran, 2. Tipe (PG → Isian → Uraian), 3. No Soal
                         const typeOrder = { 'pilihan_ganda': 1, 'isian': 2, 'uraian': 3 };
                         filteredQuestions.sort((a, b) => {
                             // 1. Sort by mataPelajaran first
@@ -6126,7 +6126,12 @@
                             const typeB = typeOrder[b.tipe] || 99;
                             if (typeA !== typeB) return typeA - typeB;
 
-                            // 3. Sort by creation time
+                            // 3. Sort by noSoal (numeric)
+                            const noA = parseInt(a.noSoal) || 0;
+                            const noB = parseInt(b.noSoal) || 0;
+                            if (noA !== noB && (noA !== 0 || noB !== 0)) return noA - noB;
+
+                            // 4. Sort by creation time (fallback)
                             const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
                             const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
                             return timeA - timeB;
