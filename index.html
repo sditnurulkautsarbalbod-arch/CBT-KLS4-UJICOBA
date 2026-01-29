@@ -1747,6 +1747,27 @@
                 return Math.round((1 - distance / maxLen) * 100);
             },
 
+            // Fuzzy word match - toleransi 1-2 typo per kata (Levenshtein Distance)
+            fuzzyWordMatch(word1, word2) {
+                const w1 = this.normalize(word1);
+                const w2 = this.normalize(word2);
+
+                if (w1 === w2) return true;
+
+                // Toleransi typo berdasarkan panjang kata
+                const maxLen = Math.max(w1.length, w2.length);
+                const distance = this.levenshteinDistance(w1, w2);
+
+                // Kata pendek (<=4 huruf): toleransi 1 typo
+                // Kata sedang (5-7 huruf): toleransi 1-2 typo
+                // Kata panjang (>7 huruf): toleransi 2 typo
+                let allowedTypos = 1;
+                if (maxLen >= 5 && maxLen <= 7) allowedTypos = 2;
+                if (maxLen > 7) allowedTypos = 2;
+
+                return distance <= allowedTypos;
+            },
+
             // Generate N-grams dari text
             generateNgrams(text, n = 2) {
                 const normalized = this.normalize(text);
@@ -1791,6 +1812,9 @@
                     'atau', 'ada', 'mereka', 'sudah', 'saya', 'kita', 'kami', 'anda',
                     'bisa', 'dapat', 'harus', 'oleh', 'setelah', 'tentang', 'seperti',
                     'ketika', 'saat', 'jika', 'maka', 'karena', 'agar', 'supaya',
+                    'yaitu', 'yakni', 'merupakan', 'ialah', 'tersebut', 'sangat',
+                    'lebih', 'paling', 'lalu', 'kemudian', 'sebelum', 'sesudah',
+                    'bahwa', 'hal', 'cara', 'melalui', 'antara', 'sama', 'serta',
                     'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been',
                     'of', 'to', 'in', 'for', 'on', 'with', 'at', 'by', 'from'
                 ]);
@@ -1800,30 +1824,42 @@
                 return words.filter(w => !stopwords.has(w));
             },
 
-            // Keyword Matching Similarity (0-100)
+            // Keyword Matching dengan Fuzzy (toleransi typo 1-2 karakter)
             keywordSimilarity(str1, str2) {
-                const keywords1 = this.extractKeywords(str1);
-                const keywords2 = this.extractKeywords(str2);
-                
+                const keywords1 = this.extractKeywords(str1); // jawaban siswa
+                const keywords2 = this.extractKeywords(str2); // kunci jawaban
+
                 if (keywords1.length === 0 && keywords2.length === 0) return 100;
                 if (keywords1.length === 0 || keywords2.length === 0) return 0;
-                
+
                 let matchScore = 0;
-                const totalKeywords = Math.max(keywords1.length, keywords2.length);
-                
-                keywords1.forEach(kw1 => {
-                    // Cari keyword yang cocok atau mirip (toleransi typo)
-                    const bestMatch = keywords2.reduce((best, kw2) => {
-                        const sim = this.levenshteinSimilarity(kw1, kw2);
-                        return sim > best ? sim : best;
-                    }, 0);
-                    
-                    // Jika similarity > 80%, anggap match (toleransi typo)
-                    if (bestMatch >= 80) {
-                        matchScore += bestMatch / 100;
+                const totalKeywords = keywords2.length; // Gunakan kunci jawaban sebagai acuan
+
+                // Untuk setiap keyword di kunci jawaban, cek apakah ada di jawaban siswa
+                keywords2.forEach(correctKeyword => {
+                    // Cek exact match atau fuzzy match (toleransi 1-2 typo)
+                    const hasMatch = keywords1.some(studentKeyword => {
+                        if (studentKeyword === correctKeyword) return true;
+                        if (this.fuzzyWordMatch(studentKeyword, correctKeyword)) return true;
+                        return false;
+                    });
+
+                    if (hasMatch) {
+                        matchScore += 1;
+                    } else {
+                        // Partial match dengan Levenshtein untuk kata mirip
+                        const bestSimilarity = keywords1.reduce((best, kw) => {
+                            const sim = this.levenshteinSimilarity(kw, correctKeyword);
+                            return sim > best ? sim : best;
+                        }, 0);
+
+                        // Jika similarity >= 70%, beri partial credit
+                        if (bestSimilarity >= 70) {
+                            matchScore += bestSimilarity / 100;
+                        }
                     }
                 });
-                
+
                 return Math.round((matchScore / totalKeywords) * 100);
             },
 
@@ -1832,57 +1868,56 @@
                 // Normalisasi dulu
                 const student = this.normalize(studentAnswer);
                 const correct = this.normalize(correctAnswer);
-                
+
                 // Jika persis sama, langsung 100
                 if (student === correct) return 100;
-                
+
                 // Jika kosong
                 if (!student || student === 'tidak dijawab') return 0;
                 if (!correct) return 0;
-                
+
                 // Hitung 3 metode similarity
                 const levenshtein = this.levenshteinSimilarity(studentAnswer, correctAnswer);
                 const ngram = this.ngramSimilarity(studentAnswer, correctAnswer, 2);
                 const keyword = this.keywordSimilarity(studentAnswer, correctAnswer);
-                
-                // Bobot: Keyword 40%, Levenshtein 35%, N-gram 25%
-                // Keyword paling penting untuk menilai konsep
-                const weightedScore = (keyword * 0.40) + (levenshtein * 0.35) + (ngram * 0.25);
-                
+
+                // Bobot: Keyword 50%, Levenshtein 30%, N-gram 20%
+                // Keyword paling penting untuk menilai konsep uraian
+                const weightedScore = (keyword * 0.50) + (levenshtein * 0.30) + (ngram * 0.20);
+
                 return Math.round(weightedScore);
             },
 
-            // Fungsi utama untuk menilai jawaban
+            // ===== PENILAIAN FLEKSIBEL UNTUK SOAL URAIAN =====
+            // 1. Normalization: lowercase, trim, hapus tanda baca
+            // 2. Keyword Scoring: poin untuk kata kunci yang ditemukan
+            // 3. Fuzzy Matching: toleransi typo 1-2 karakter (Levenshtein)
+            // 4. Threshold 60%: similarity >= 60% = nilai 100
             gradeAnswer(studentAnswer, correctAnswer) {
                 const similarity = this.calculateCombinedSimilarity(studentAnswer, correctAnswer);
-                
-                // ATURAN PENILAIAN:
-                // Jika similarity >= 60%, berikan nilai PENUH (100) - toleransi typo
-                // Di bawah 60%, nilai proporsional
-                
+
                 let nilai;
-                if (similarity >= 60) {
-                    // Toleransi typo: 60% kemiripan = 100% nilai
-                    nilai = 100;
-                } else if (similarity >= 50) {
-                    // Nilai proporsional 50-99
-                    nilai = 50 + Math.round((similarity - 50) * 3.27); // 50% sim = 50 nilai, 64% sim = 96 nilai
-                } else {
-                    // Di bawah 50%, nilai proporsional rendah
-                    nilai = Math.round(similarity);
-                }
-                
-                // Generate feedback
                 let feedback;
-                if (nilai >= 100) {
-                    feedback = 'Jawaban benar! Sesuai dengan kunci jawaban.';
-                } else if (nilai >= 75) {
-                    feedback = 'Jawaban sudah mendekati benar, namun ada sedikit perbedaan.';
-                } else if (nilai >= 50) {
+
+                if (similarity >= 60) {
+                    // THRESHOLD 60%: Dianggap BENAR (nilai penuh)
+                    nilai = 100;
+                    feedback = 'Jawaban benar! Konsep dan kata kunci sesuai dengan kunci jawaban.';
+                } else if (similarity >= 50) {
+                    // Hampir mencapai threshold - nilai tinggi proporsional
+                    nilai = 70 + Math.round((similarity - 50) * 3); // 50% = 70, 59% = 97
+                    feedback = 'Jawaban sudah mendekati benar, ada sedikit perbedaan kata kunci.';
+                } else if (similarity >= 40) {
+                    // Cukup - sebagian konsep benar
+                    nilai = 50 + Math.round((similarity - 40) * 2); // 40% = 50, 49% = 68
                     feedback = 'Jawaban cukup, beberapa konsep penting sudah disebutkan.';
-                } else if (nilai >= 25) {
-                    feedback = 'Jawaban kurang lengkap, perlu perbaikan.';
+                } else if (similarity >= 25) {
+                    // Kurang - perlu perbaikan
+                    nilai = 25 + Math.round((similarity - 25) * 1.67); // 25% = 25, 39% = 48
+                    feedback = 'Jawaban kurang lengkap, perlu menambahkan kata kunci penting.';
                 } else {
+                    // Salah - tidak sesuai
+                    nilai = Math.round(similarity);
                     feedback = 'Jawaban tidak sesuai dengan kunci jawaban.';
                 }
                 
