@@ -2897,18 +2897,41 @@
             },
 
             renderFilteredQuestions(questions) {
-                AppState.currentlyDisplayed.questions = questions; 
+                AppState.currentlyDisplayed.questions = questions;
                 const questionsList = document.getElementById('questionsList');
                 if (!questionsList) return;
 
-                questionsList.innerHTML = questions.length === 0 ?
+                // Calculate question numbers that reset per subject
+                let currentSubject = null;
+                let subjectQuestionNumber = 0;
+                const questionsWithNumbers = questions.map((question) => {
+                    if (question.mataPelajaran !== currentSubject) {
+                        currentSubject = question.mataPelajaran;
+                        subjectQuestionNumber = 1;
+                    } else {
+                        subjectQuestionNumber++;
+                    }
+                    return { ...question, displayNumber: subjectQuestionNumber };
+                });
+
+                questionsList.innerHTML = questionsWithNumbers.length === 0 ?
                     '<div class="bg-white rounded-lg shadow p-6 text-center text-gray-500">Tidak ada soal yang sesuai dengan filter</div>' :
-                    questions.map((question, index) => {
-                        const canEdit = AppState.currentUser.role === 'admin' || 
+                    questionsWithNumbers.map((question, index) => {
+                        const canEdit = AppState.currentUser.role === 'admin' ||
                                       (question.createdBy && question.createdBy === AppState.currentUser.nama) ||
                                       (!question.createdBy && AppState.currentUser.role === 'guru');
 
+                        // Show subject header when subject changes
+                        const prevQuestion = index > 0 ? questionsWithNumbers[index - 1] : null;
+                        const showSubjectHeader = !prevQuestion || prevQuestion.mataPelajaran !== question.mataPelajaran;
+                        const subjectHeader = showSubjectHeader ? `
+                            <div class="bg-gradient-to-r from-blue-600 to-teal-500 text-white rounded-lg shadow p-4 mb-4">
+                                <h3 class="text-lg font-bold"><i class="fas fa-book mr-2"></i>${question.mataPelajaran}</h3>
+                            </div>
+                        ` : '';
+
                         return `
+                        ${subjectHeader}
                         <div class="bg-white rounded-lg shadow p-6">
                             <div class="flex justify-between items-start">
                                 <div class="flex-1">
@@ -2919,7 +2942,7 @@
                                         <span class="text-xs text-gray-500">Kode: ${question.kode}</span>
                                         <span class="text-xs text-gray-400">Dibuat oleh: ${question.createdBy || '-'}</span>
                                     </div>
-                                    <h4 class="font-medium text-gray-900 mb-2">Soal No. ${index + 1 + (AppState.pagination.questions.currentPage - 1) * AppState.itemsPerPage}</h4>
+                                    <h4 class="font-medium text-gray-900 mb-2">Soal No. ${question.displayNumber}</h4>
                                     <p class="text-gray-700 mb-3">${(question.pertanyaan || '').length > 100 ? (question.pertanyaan || '').substring(0, 100) + '...' : (question.pertanyaan || '')}</p>
                                 </div>
                                 <div class="flex space-x-3 ml-4">
