@@ -2896,23 +2896,27 @@
                 });
             },
 
-            renderFilteredQuestions(questions) {
+            renderFilteredQuestions(questions, allQuestions = null, startIndex = 0) {
                 AppState.currentlyDisplayed.questions = questions;
                 const questionsList = document.getElementById('questionsList');
                 if (!questionsList) return;
 
-                // Calculate question numbers that reset per subject
-                let currentSubject = null;
-                let subjectQuestionNumber = 0;
-                const questionsWithNumbers = questions.map((question) => {
-                    if (question.mataPelajaran !== currentSubject) {
-                        currentSubject = question.mataPelajaran;
-                        subjectQuestionNumber = 1;
-                    } else {
-                        subjectQuestionNumber++;
-                    }
-                    return { ...question, displayNumber: subjectQuestionNumber };
-                });
+                // If displayNumber already exists (from renderQuestionsFromCache), use it directly
+                // Otherwise calculate locally (fallback for direct calls)
+                let questionsWithNumbers = questions;
+                if (!questions[0]?.displayNumber) {
+                    let currentSubject = null;
+                    let subjectQuestionNumber = 0;
+                    questionsWithNumbers = questions.map((question) => {
+                        if (question.mataPelajaran !== currentSubject) {
+                            currentSubject = question.mataPelajaran;
+                            subjectQuestionNumber = 1;
+                        } else {
+                            subjectQuestionNumber++;
+                        }
+                        return { ...question, displayNumber: subjectQuestionNumber };
+                    });
+                }
 
                 questionsList.innerHTML = questionsWithNumbers.length === 0 ?
                     '<div class="bg-white rounded-lg shadow p-6 text-center text-gray-500">Tidak ada soal yang sesuai dengan filter</div>' :
@@ -2922,7 +2926,9 @@
                                       (!question.createdBy && AppState.currentUser.role === 'guru');
 
                         // Show subject header when subject changes
-                        const prevQuestion = index > 0 ? questionsWithNumbers[index - 1] : null;
+                        // Check previous question in full list (allQuestions) for correct header on page boundaries
+                        const globalIndex = startIndex + index;
+                        const prevQuestion = globalIndex > 0 && allQuestions ? allQuestions[globalIndex - 1] : (index > 0 ? questionsWithNumbers[index - 1] : null);
                         const showSubjectHeader = !prevQuestion || prevQuestion.mataPelajaran !== question.mataPelajaran;
                         const subjectHeader = showSubjectHeader ? `
                             <div class="bg-gradient-to-r from-blue-600 to-teal-500 text-white rounded-lg shadow p-4 mb-4">
@@ -6146,9 +6152,24 @@
                 AppState.pagination.questions.totalItems = cachedData.length;
                 const start = (AppState.pagination.questions.currentPage - 1) * AppState.itemsPerPage;
                 const end = start + AppState.itemsPerPage;
-                const paginatedItems = cachedData.slice(start, end);
 
-                Management.renderFilteredQuestions(paginatedItems);
+                // Calculate question numbers for ALL questions first (before pagination)
+                let currentSubject = null;
+                let subjectQuestionNumber = 0;
+                const allQuestionsWithNumbers = cachedData.map((question) => {
+                    if (question.mataPelajaran !== currentSubject) {
+                        currentSubject = question.mataPelajaran;
+                        subjectQuestionNumber = 1;
+                    } else {
+                        subjectQuestionNumber++;
+                    }
+                    return { ...question, displayNumber: subjectQuestionNumber };
+                });
+
+                // Now slice for pagination (numbers are already calculated correctly)
+                const paginatedItems = allQuestionsWithNumbers.slice(start, end);
+
+                Management.renderFilteredQuestions(paginatedItems, allQuestionsWithNumbers, start);
 
                 UI.renderPaginationControls('questionsPagination', AppState.pagination.questions, (newPage) => {
                     AppState.pagination.questions.currentPage = newPage;
