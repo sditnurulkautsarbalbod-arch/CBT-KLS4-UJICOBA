@@ -2736,6 +2736,8 @@
                     try {
                         await DataService.unblockStudent(blockId);
                         UI.showNotification('Blokir siswa berhasil dibuka!', 'success');
+                        // Force refresh from server to ensure UI is in sync
+                        await DataService.getBlockedStudents(true);
                         UI.renderBlockedStudents();
                     } catch (error) {
                         console.error("Error unblocking student: ", error);
@@ -2754,6 +2756,8 @@
                     });
                     try {
                         await DataService.unblockAllStudents();
+                        // Force refresh from server to ensure UI is in sync
+                        await DataService.getBlockedStudents(true);
                         Swal.close();
                         UI.showNotification('Semua blokir siswa berhasil dibuka!', 'success');
                         UI.renderBlockedStudents();
@@ -5182,45 +5186,65 @@
                         e.preventDefault();
                         const examCode = document.getElementById('examCode').value.trim();
                         const errorDiv = document.getElementById('examCodeError');
+                        const submitBtn = e.target.querySelector('button[type="submit"]');
                         const studentUsername = AppState.currentUser.username;
-                        
+
                         if (!examCode) {
                             errorDiv.textContent = 'Silakan masukkan kode soal!';
                             errorDiv.classList.remove('hidden');
                             return;
                         }
 
-                        // Arsitektur baru: Cek dari IndexedDB dulu
-                        const isBlocked = await DataService.isStudentBlocked(studentUsername, examCode);
-
-                        if (isBlocked) {
-                            errorDiv.textContent = 'Akses Anda ke soal ini diblokir. Hubungi admin untuk membuka blokir.';
-                            errorDiv.classList.remove('hidden');
-                            return;
-                        }
-                        
-                        // Check if exam code exists via Google Script
-                        const result = await callGoogleScript('GET', { action: 'getQuestions', kode: examCode });
-                        if (result.status !== 'success' || result.data.length === 0) {
-                             errorDiv.textContent = 'Kode soal tidak ditemukan!';
-                            errorDiv.classList.remove('hidden');
-                            return;
-                        }
-
-                        // New: Check if student's grade level matches exam's grade level
-                        const examData = result.data[0];
-                        const studentGrade = AppState.currentUser.kelas.charAt(0);
-                        const examGrade = examData.kelas.charAt(0);
-
-                        if (studentGrade !== examGrade) {
-                            errorDiv.textContent = 'Anda tidak diizinkan mengerjakan soal untuk kelas ini.';
-                            errorDiv.classList.remove('hidden');
-                            return;
-                        }
-                        
+                        // Show loading state
                         errorDiv.classList.add('hidden');
-                        AppState.selectedExamCode = examCode;
-                        UI.showExamLockScreen();
+                        submitBtn.disabled = true;
+                        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i><span class="font-semibold">Memuat Soal...</span>';
+
+                        try {
+                            // Arsitektur baru: Cek dari IndexedDB dulu
+                            const isBlocked = await DataService.isStudentBlocked(studentUsername, examCode);
+
+                            if (isBlocked) {
+                                errorDiv.textContent = 'Akses Anda ke soal ini diblokir. Hubungi admin untuk membuka blokir.';
+                                errorDiv.classList.remove('hidden');
+                                submitBtn.disabled = false;
+                                submitBtn.innerHTML = '<i class="fas fa-play"></i><span class="font-semibold">Mulai Ujian</span>';
+                                return;
+                            }
+
+                            // Check if exam code exists via Google Script
+                            const result = await callGoogleScript('GET', { action: 'getQuestions', kode: examCode });
+                            if (result.status !== 'success' || result.data.length === 0) {
+                                 errorDiv.textContent = 'Kode soal tidak ditemukan!';
+                                errorDiv.classList.remove('hidden');
+                                submitBtn.disabled = false;
+                                submitBtn.innerHTML = '<i class="fas fa-play"></i><span class="font-semibold">Mulai Ujian</span>';
+                                return;
+                            }
+
+                            // New: Check if student's grade level matches exam's grade level
+                            const examData = result.data[0];
+                            const studentGrade = AppState.currentUser.kelas.charAt(0);
+                            const examGrade = examData.kelas.charAt(0);
+
+                            if (studentGrade !== examGrade) {
+                                errorDiv.textContent = 'Anda tidak diizinkan mengerjakan soal untuk kelas ini.';
+                                errorDiv.classList.remove('hidden');
+                                submitBtn.disabled = false;
+                                submitBtn.innerHTML = '<i class="fas fa-play"></i><span class="font-semibold">Mulai Ujian</span>';
+                                return;
+                            }
+
+                            errorDiv.classList.add('hidden');
+                            AppState.selectedExamCode = examCode;
+                            UI.showExamLockScreen();
+                        } catch (error) {
+                            console.error('Error starting exam:', error);
+                            errorDiv.textContent = 'Terjadi kesalahan. Silakan coba lagi.';
+                            errorDiv.classList.remove('hidden');
+                            submitBtn.disabled = false;
+                            submitBtn.innerHTML = '<i class="fas fa-play"></i><span class="font-semibold">Mulai Ujian</span>';
+                        }
                     });
                 }
 
