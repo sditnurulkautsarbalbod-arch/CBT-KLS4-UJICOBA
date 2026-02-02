@@ -1930,6 +1930,256 @@
         };
 
         // =================================================================
+        // SISTEM PENILAIAN SD (Keyword Coverage-based Grading)
+        // Khusus untuk anak SD dengan toleransi lebih longgar dan nilai lebih motivatif
+        // =================================================================
+        const SDGrading = {
+            // ===== KONFIGURASI PENILAIAN SD =====
+            config: {
+                // Skala nilai (lebih lembut untuk SD)
+                scoreRanges: [
+                    { min: 0, max: 9, score: 20, status: 'Mencoba', feedback: 'Terus berusaha ya!' },
+                    { min: 10, max: 19, score: 30, status: 'Kurang', feedback: 'Ada usaha, terus belajar!' },
+                    { min: 20, max: 29, score: 45, status: 'Cukup', feedback: 'Mulai paham, bagus!' },
+                    { min: 30, max: 39, score: 60, status: 'Cukup Baik', feedback: 'Bagus sekali!' },
+                    { min: 40, max: 49, score: 75, status: 'Baik', feedback: 'Hebat! Kamu paham sebagian besar!' },
+                    { min: 50, max: 59, score: 90, status: 'Sangat Baik', feedback: 'Sangat Hebat!' },
+                    { min: 60, max: 100, score: 100, status: 'Luar Biasa!', feedback: 'Luar Biasa! Kamu Pintar!' }
+                ],
+
+                // Typo tolerance (lebih longgar untuk SD)
+                typoTolerance: {
+                    minLength: 4,    // Kata ≤ 4 huruf: 0 typo
+                    shortWord: 7,   // Kata 5-7 huruf: 1 typo
+                    mediumWord: 12, // Kata 8-12 huruf: 2 typo
+                    longWord: 99    // Kata >12 huruf: 3 typo
+                },
+
+                // Fuzzy match threshold (lebih rendah untuk SD)
+                fuzzyThreshold: 0.65,  // 65% similarity dianggap match
+
+                // Stopword bahasa Indonesia (dihapus dari penilaian)
+                stopwords: [
+                    // Kata penghubung
+                    'dan', 'atau', 'tetapi', 'namun', 'karena', 'maka', 'jika',
+                    'sehingga', 'untuk', 'dengan', 'pada', 'di', 'ke', 'dari', 'dalam',
+                    // Kata tanya
+                    'apa', 'siapa', 'mengapa', 'bagaimana', 'kapan', 'dimana', 'kenapa',
+                    // Pronomina
+                    'saya', 'aku', 'kamu', 'engkau', 'dia', 'mereka', 'kita', 'kami',
+                    // Partikel
+                    'yang', 'pun', 'lah', 'kah', 'tah', 'juga', 'lagi', 'lebih', 'paling',
+                    // Preposisi
+                    'oleh', 'yaitu', 'ialah', 'yakni', 'adalah', 'menjadi',
+                    // Kuantitas
+                    'semua', 'tiap', 'setiap', 'banyak', 'sedikit', 'sebagian',
+                    // Kata lain-lain
+                    'ini', 'itu', 'tersebut', 'sangat', 'lalu', 'kemudian', 'sebelum', 'sesudah',
+                    'bahwa', 'hal', 'cara', 'melalui', 'antara', 'sama', 'serta',
+                    // English common words
+                    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been',
+                    'of', 'to', 'in', 'for', 'on', 'with', 'at', 'by', 'from'
+                ]
+            },
+
+            // ===== FUNGSI UTAMA: gradeAnswerForSD =====
+            // Menilai jawaban siswa dengan metode keyword coverage
+            gradeAnswerForSD(studentAnswer, correctAnswer) {
+                // STEP 1: Ekstrak kata kunci
+                const correctKeywords = this.extractKeywords(correctAnswer);
+                const studentKeywords = this.extractKeywords(studentAnswer);
+
+                // STEP 2: Hitung matches
+                let totalScore = 0;
+                const matchedKeywords = [];
+                const missedKeywords = [];
+
+                correctKeywords.forEach(correctKeyword => {
+                    let bestMatch = null;
+                    let bestSimilarity = 0;
+
+                    // Cari match terbaik di jawaban siswa
+                    studentKeywords.forEach(studentKeyword => {
+                        const similarity = this.calculateSimilarity(
+                            studentKeyword,
+                            correctKeyword
+                        );
+
+                        if (similarity > bestSimilarity) {
+                            bestMatch = studentKeyword;
+                            bestSimilarity = similarity;
+                        }
+                    });
+
+                    // Hitung skor berdasarkan similarity
+                    if (bestSimilarity >= this.config.fuzzyThreshold) {
+                        totalScore += 1;
+                        matchedKeywords.push({
+                            correct: correctKeyword,
+                            student: bestMatch,
+                            similarity: bestSimilarity,
+                            type: 'full'
+                        });
+                    } else if (bestSimilarity >= 0.5) {
+                        // Partial match (setengah poin)
+                        totalScore += 0.5;
+                        matchedKeywords.push({
+                            correct: correctKeyword,
+                            student: bestMatch,
+                            similarity: bestSimilarity,
+                            type: 'partial'
+                        });
+                    } else {
+                        missedKeywords.push(correctKeyword);
+                    }
+                });
+
+                // STEP 3: Hitung persentase
+                const percentage = (totalScore / correctKeywords.length) * 100;
+
+                // STEP 4: Tentukan skor akhir
+                const scoreRange = this.config.scoreRanges.find(
+                    range => percentage >= range.min && percentage <= range.max
+                );
+
+                const finalScore = scoreRange ? scoreRange.score : 0;
+                const feedback = scoreRange ? scoreRange.feedback : "";
+                const status = scoreRange ? scoreRange.status : "";
+
+                // STEP 5: Generate detailed feedback
+                const detailFeedback = this.generateDetailedFeedback(
+                    matchedKeywords,
+                    missedKeywords,
+                    percentage
+                );
+
+                return {
+                    score: finalScore,
+                    percentage: Math.round(percentage),
+                    status: status,
+                    feedback: feedback,
+                    detailFeedback: detailFeedback,
+                    matched: matchedKeywords,
+                    missed: missedKeywords,
+                    totalKeywords: correctKeywords.length,
+                    matchedCount: matchedKeywords.length,
+                    details: {
+                        totalScore: totalScore,
+                        exactMatches: matchedKeywords.filter(m => !m.partial && m.type === 'full').length,
+                        partialMatches: matchedKeywords.filter(m => m.type === 'partial').length
+                    }
+                };
+            },
+
+            // ===== EKSTRAKSI KATA KUNCI =====
+            extractKeywords(text) {
+                if (!text) return [];
+
+                // Lowercase dan hapus tanda baca
+                let normalized = text.toLowerCase()
+                    .replace(/[^\w\s]/g, '')  // Hapus tanda baca
+                    .replace(/\s+/g, ' ')      // Multiple spaces jadi single
+                    .trim();
+
+                // Split menjadi kata-kata
+                const words = normalized.split(' ').filter(w => w.length > 2);
+
+                // Hapus stopwords
+                const keywords = words.filter(
+                    word => !this.config.stopwords.includes(word)
+                );
+
+                // Hapus duplikat dan return
+                return [...new Set(keywords)];
+            },
+
+            // ===== HITUNG SIMILARITY DENGAN TYPO TOLERANCE =====
+            calculateSimilarity(str1, str2) {
+                const len1 = str1.length;
+
+                // Tentukan max typo berdasarkan panjang kata
+                let maxTypo;
+                if (len1 <= this.config.typoTolerance.minLength) {
+                    maxTypo = 0;
+                } else if (len1 <= this.config.typoTolerance.shortWord) {
+                    maxTypo = 1;
+                } else if (len1 <= this.config.typoTolerance.mediumWord) {
+                    maxTypo = 2;
+                } else {
+                    maxTypo = 3;
+                }
+
+                // Hitung Levenshtein distance
+                const distance = this.levenshteinDistance(str1, str2);
+
+                // Jika melebihi tolerance, tidak match
+                if (distance > maxTypo) {
+                    return 0;
+                }
+
+                // Hitung similarity
+                const maxLength = Math.max(len1, str2.length);
+                const similarity = 1 - (distance / maxLength);
+
+                return similarity;
+            },
+
+            // ===== LEVENSHTEIN DISTANCE =====
+            levenshteinDistance(str1, str2) {
+                const m = str1.length;
+                const n = str2.length;
+                const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
+
+                for (let i = 0; i <= m; i++) dp[i][0] = i;
+                for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+                for (let i = 1; i <= m; i++) {
+                    for (let j = 1; j <= n; j++) {
+                        if (str1[i - 1] === str2[j - 1]) {
+                            dp[i][j] = dp[i - 1][j - 1];
+                        } else {
+                            dp[i][j] = 1 + Math.min(
+                                dp[i - 1][j],      // Delete
+                                dp[i][j - 1],      // Insert
+                                dp[i - 1][j - 1]   // Replace
+                            );
+                        }
+                    }
+                }
+
+                return dp[m][n];
+            },
+
+            // ===== GENERATE DETAILED FEEDBACK =====
+            generateDetailedFeedback(matchedKeywords, missedKeywords, percentage) {
+                let feedback = "";
+
+                // Highlight kata yang cocok
+                if (matchedKeywords.length > 0) {
+                    const exactMatches = matchedKeywords.filter(m => m.type === 'full');
+                    const partialMatches = matchedKeywords.filter(m => m.type === 'partial');
+
+                    feedback += `<strong>Kata yang cocok:</strong> ${exactMatches.map(m => m.student).join(', ')}`;
+                    if (partialMatches.length > 0) {
+                        feedback += ` (hampir: ${partialMatches.map(m => m.student).join(', ')})`;
+                    }
+                }
+
+                // Highlight kata yang kurang
+                if (missedKeywords.length > 0) {
+                    if (feedback) feedback += "<br><br>";
+                    feedback += `<strong>Kata yang kurang:</strong> ${missedKeywords.join(', ')}`;
+                }
+
+                // Persentase
+                if (feedback) feedback += "<br><br>";
+                feedback += `<strong>Persentase:</strong> ${Math.round(percentage)}% kata kunci yang cocok`;
+
+                return feedback;
+            }
+        };
+
+        // =================================================================
         // GOOGLE SCRIPT HELPER (Full Google Sheets)
         // =================================================================
 
@@ -3591,7 +3841,11 @@
                                 if (!question || !question.jawabanBenar) continue;
 
                                 // Gunakan TextSimilarity sebagai pengganti AI
-                                const gradingResult = TextSimilarity.gradeAnswer(result.jawabanSiswa, question.jawabanBenar);
+                                // Untuk SD (Kelas 4-6), gunakan sistem penilaian SD yang lebih longgar
+                                const isSDClass = ['4A', '4B', '4C', '4D', '5A', '5B', '6A', '6B'].includes(result.kelas);
+                                const gradingResult = isSDClass
+                                    ? SDGrading.gradeAnswerForSD(result.jawabanSiswa, question.jawabanBenar)
+                                    : TextSimilarity.gradeAnswer(result.jawabanSiswa, question.jawabanBenar);
 
                                 if (gradingResult) {
                                     const newNilai = gradingResult.nilai;
@@ -3685,7 +3939,11 @@
                     if (!question || !question.jawabanBenar) throw new Error(`Kunci jawaban untuk soal no. ${resultData.noSoal} tidak ditemukan.`);
                     
                     // Gunakan TextSimilarity sebagai pengganti AI
-                    const gradingResult = TextSimilarity.gradeAnswer(resultData.jawabanSiswa, question.jawabanBenar);
+                    // Untuk SD (Kelas 4-6), gunakan sistem penilaian SD yang lebih longgar
+                    const isSDClass = ['4A', '4B', '4C', '4D', '5A', '5B', '6A', '6B'].includes(resultData.kelas);
+                    const gradingResult = isSDClass
+                        ? SDGrading.gradeAnswerForSD(resultData.jawabanSiswa, question.jawabanBenar)
+                        : TextSimilarity.gradeAnswer(resultData.jawabanSiswa, question.jawabanBenar);
                     if (!gradingResult) throw new Error("Gagal mendapatkan nilai.");
                     
                     const newNilai = gradingResult.nilai;
