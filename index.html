@@ -958,6 +958,14 @@
                             }
                             return updateResult;
                         case 'delete':
+                            // Special case: blockedStudents uses 'unblockStudent' action with blockId
+                            if (storeName === 'blockedStudents') {
+                                // Handle single unblock or unblock all
+                                if (data.all) {
+                                    return await callGoogleScript('POST', { action: 'unblockAllStudents', data: {} });
+                                }
+                                return await callGoogleScript('POST', { action: 'unblockStudent', data: { blockId: data.blockId || data.id, username: data.username, examCode: data.examCode } });
+                            }
                             return await callGoogleScript('POST', { action: `delete${this.capitalize(storeName)}`, data: { id: data.id, ...data } });
                         default:
                             throw new Error(`Unknown action: ${action}`);

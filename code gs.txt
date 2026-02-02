@@ -114,7 +114,7 @@ function doPost(e) {
         blockStudent(requestData.data);
         return createJsonResponse({ status: 'success', message: 'Student blocked successfully' });
       case 'unblockStudent':
-        unblockStudent(requestData.data.blockId);
+        unblockStudent(requestData.data);
         return createJsonResponse({ status: 'success', message: 'Student unblocked successfully' });
       case 'unblockAllStudents':
         unblockAllStudents();
@@ -616,21 +616,36 @@ function blockStudent(data) {
   }
 }
 
-function unblockStudent(blockId) {
+function unblockStudent(data) {
   var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEETS.BLOCKED_STUDENTS);
   if (!sheet) return;
-  
-  var data = sheet.getDataRange().getValues();
-  var headers = data[0];
+
+  var sheetData = sheet.getDataRange().getValues();
+  var headers = sheetData[0];
   var blockIdColIndex = headers.indexOf('blockId');
-  if (blockIdColIndex === -1) return;
-  
-  for (var i = data.length - 1; i >= 1; i--) {
-    if (data[i][blockIdColIndex] === blockId) {
+  var usernameColIndex = headers.indexOf('username');
+  var examCodeColIndex = headers.indexOf('examCode');
+
+  // Support both old format (just blockId string) and new format (object with blockId, username, examCode)
+  var blockId = typeof data === 'string' ? data : (data.blockId || data.id);
+  var username = typeof data === 'object' ? data.username : null;
+  var examCode = typeof data === 'object' ? data.examCode : null;
+
+  for (var i = sheetData.length - 1; i >= 1; i--) {
+    var matchByBlockId = blockIdColIndex > -1 && sheetData[i][blockIdColIndex] === blockId;
+    var matchByUsernameExam = usernameColIndex > -1 && examCodeColIndex > -1 &&
+                               username && examCode &&
+                               sheetData[i][usernameColIndex] === username &&
+                               sheetData[i][examCodeColIndex] === examCode;
+
+    if (matchByBlockId || matchByUsernameExam) {
       sheet.deleteRow(i + 1);
-      break;
+      Logger.log('Unblocked student: ' + (username || blockId));
+      return;
     }
   }
+
+  Logger.log('Student not found for unblock: ' + blockId);
 }
 
 function unblockAllStudents() {
