@@ -1624,13 +1624,18 @@
             
             async unblockStudent(blockId) {
                 const cached = CacheHelper.getCached('blockedStudents') || [];
+                // Find the blocked student to get username and examCode for proper sync
+                const blockedStudent = cached.find(b => b.id === blockId || b.blockId === blockId);
                 const filteredData = cached.filter(b => b.id !== blockId && b.blockId !== blockId);
                 AppState.cache.set('blockedStudents', { data: filteredData, timestamp: Date.now(), valid: true });
                 await IndexedDBService.delete('blockedStudents', blockId);
-                
-                // Enqueue for background sync
-                await BackgroundSync.queueOperation('delete', 'blockedStudents', { id: blockId });
-                
+
+                // Enqueue for background sync - include username and examCode for Google Sheet deletion
+                const syncData = blockedStudent
+                    ? { id: blockId, blockId: blockedStudent.blockId, username: blockedStudent.username, examCode: blockedStudent.examCode }
+                    : { id: blockId };
+                await BackgroundSync.queueOperation('delete', 'blockedStudents', syncData);
+
                 return { success: true, message: 'Siswa berhasil di-unblock' };
             },
             
@@ -5235,73 +5240,121 @@
 
                 content.innerHTML = `
                     <div class="fade-in">
-                        <h2 class="text-2xl font-bold text-gray-900 mb-6">Pengaturan Ujian</h2>
-                        <div class="max-w-lg mx-auto bg-white rounded-lg shadow p-8">
-                            <form id="settingsForm">
-                                <div class="mb-6">
-                                    <label for="examDuration" class="block text-lg font-medium text-gray-700 mb-2">Durasi Waktu Ujian (menit)</label>
-                                    <p class="text-sm text-gray-500 mb-3">Atur berapa lama waktu yang dimiliki siswa untuk menyelesaikan ujian.</p>
+                        <h2 class="text-2xl font-bold text-gray-900 mb-6">Pengaturan</h2>
+
+                        <!-- Card 1: Pengaturan Ujian (Server) -->
+                        <div class="max-w-lg mx-auto bg-white rounded-lg shadow p-6 mb-6">
+                            <div class="flex items-center gap-3 mb-4">
+                                <div class="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                                    <i class="fas fa-clock text-blue-600"></i>
+                                </div>
+                                <div>
+                                    <h3 class="text-lg font-semibold text-gray-900">Pengaturan Waktu Ujian</h3>
+                                    <p class="text-xs text-gray-500"><i class="fas fa-cloud mr-1"></i>Tersimpan di Server (berlaku untuk semua)</p>
+                                </div>
+                            </div>
+                            <form id="examSettingsForm">
+                                <div class="mb-4">
+                                    <label for="examDuration" class="block text-sm font-medium text-gray-700 mb-2">Durasi Waktu Ujian (menit)</label>
+                                    <p class="text-xs text-gray-500 mb-2">Atur berapa lama waktu yang dimiliki siswa untuk menyelesaikan ujian.</p>
                                     <input type="number" id="examDuration" name="examDuration" min="1" required
                                            class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                            value="${currentDuration}">
                                 </div>
-                                <hr class="my-6 border-gray-200">
-                                <div class="mb-6">
-                                    <label for="geminiApiKey" class="block text-lg font-medium text-gray-700 mb-2">Google Gemini API Key</label>
-                                    <p class="text-sm text-gray-500 mb-3">Masukkan API Key Anda untuk mengaktifkan fitur pembuatan soal otomatis. Key akan disimpan di browser ini.</p>
-                                    <input type="password" id="geminiApiKey" name="geminiApiKey"
-                                           class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                           placeholder="AIzaSy..." value="${currentApiKey}">
-                                    <div class="mt-2 text-xs text-blue-600">
-                                        <a href="https://aistudio.google.com/app/apikey" target="_blank" class="hover:underline">Dapatkan API Key di sini</a>
-                                    </div>
-                                </div>
                                 <div class="flex justify-end">
-                                    <button type="submit" class="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition duration-200 font-semibold">
-                                        <i class="fas fa-save mr-2"></i>Simpan Pengaturan
+                                    <button type="submit" id="saveExamSettingsBtn" class="bg-blue-600 text-white px-5 py-2 rounded-lg hover:bg-blue-700 transition duration-200 font-semibold text-sm">
+                                        <i class="fas fa-save mr-2"></i>Simpan Durasi
                                     </button>
                                 </div>
                             </form>
                         </div>
-                        <div id="blockedStudentsSection" class="mt-12"></div>
+
+                        <!-- Card 2: API Key (Local Browser) -->
+                        <div class="max-w-lg mx-auto bg-white rounded-lg shadow p-6 mb-6">
+                            <div class="flex items-center gap-3 mb-4">
+                                <div class="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center">
+                                    <i class="fas fa-key text-amber-600"></i>
+                                </div>
+                                <div>
+                                    <h3 class="text-lg font-semibold text-gray-900">Google Gemini API Key</h3>
+                                    <p class="text-xs text-gray-500"><i class="fas fa-laptop mr-1"></i>Tersimpan di Browser ini saja (privat)</p>
+                                </div>
+                            </div>
+                            <form id="apiKeyForm">
+                                <div class="mb-4">
+                                    <label for="geminiApiKey" class="block text-sm font-medium text-gray-700 mb-2">API Key untuk Pembuatan Soal Otomatis</label>
+                                    <p class="text-xs text-gray-500 mb-2">Masukkan API Key Anda untuk mengaktifkan fitur AI. Key ini hanya tersimpan di browser ini dan tidak dikirim ke server.</p>
+                                    <input type="password" id="geminiApiKey" name="geminiApiKey"
+                                           class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500"
+                                           placeholder="AIzaSy..." value="${currentApiKey}">
+                                    <div class="mt-2 text-xs text-blue-600">
+                                        <a href="https://aistudio.google.com/app/apikey" target="_blank" class="hover:underline"><i class="fas fa-external-link-alt mr-1"></i>Dapatkan API Key di sini</a>
+                                    </div>
+                                </div>
+                                <div class="flex justify-end">
+                                    <button type="submit" id="saveApiKeyBtn" class="bg-amber-600 text-white px-5 py-2 rounded-lg hover:bg-amber-700 transition duration-200 font-semibold text-sm">
+                                        <i class="fas fa-save mr-2"></i>Simpan API Key
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+
+                        <div id="blockedStudentsSection" class="mt-8"></div>
                     </div>
                 `;
 
-                document.getElementById('settingsForm').addEventListener('submit', async (e) => {
+                // Form 1: Exam Duration Settings (synced to server)
+                document.getElementById('examSettingsForm').addEventListener('submit', async (e) => {
                     e.preventDefault();
                     const newDuration = parseInt(document.getElementById('examDuration').value);
-                    const newApiKey = document.getElementById('geminiApiKey').value.trim();
 
                     if (isNaN(newDuration) || newDuration <= 0) {
                         UI.showNotification('Masukkan durasi yang valid.', 'error');
                         return;
                     }
 
-                    const submitButton = e.target.querySelector('button[type="submit"]');
+                    const submitButton = document.getElementById('saveExamSettingsBtn');
                     submitButton.disabled = true;
                     submitButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Menyimpan...';
 
                     try {
-                        // Arsitektur baru: Simpan ke IndexedDB dulu, lalu sync ke server
                         await DataService.saveSettings({
                             key: 'examConfig',
                             durationMinutes: newDuration
                         });
-
-                        // Save API Key to localStorage (Private setting per browser)
-                        if (newApiKey) {
-                            localStorage.setItem('geminiApiKey', newApiKey);
-                        } else {
-                            localStorage.removeItem('geminiApiKey');
-                        }
-
-                        UI.showNotification('Pengaturan berhasil disimpan!', 'success');
+                        UI.showNotification('Durasi ujian berhasil disimpan!', 'success');
                     } catch (error) {
-                        console.error("Error saving settings:", error);
-                        UI.showNotification('Gagal menyimpan pengaturan!', 'error');
+                        console.error("Error saving exam settings:", error);
+                        UI.showNotification('Gagal menyimpan durasi ujian!', 'error');
                     } finally {
                         submitButton.disabled = false;
-                        submitButton.innerHTML = '<i class="fas fa-save mr-2"></i>Simpan Pengaturan';
+                        submitButton.innerHTML = '<i class="fas fa-save mr-2"></i>Simpan Durasi';
+                    }
+                });
+
+                // Form 2: API Key Settings (stored locally)
+                document.getElementById('apiKeyForm').addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const newApiKey = document.getElementById('geminiApiKey').value.trim();
+
+                    const submitButton = document.getElementById('saveApiKeyBtn');
+                    submitButton.disabled = true;
+                    submitButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Menyimpan...';
+
+                    try {
+                        if (newApiKey) {
+                            localStorage.setItem('geminiApiKey', newApiKey);
+                            UI.showNotification('API Key berhasil disimpan di browser ini!', 'success');
+                        } else {
+                            localStorage.removeItem('geminiApiKey');
+                            UI.showNotification('API Key berhasil dihapus!', 'success');
+                        }
+                    } catch (error) {
+                        console.error("Error saving API key:", error);
+                        UI.showNotification('Gagal menyimpan API Key!', 'error');
+                    } finally {
+                        submitButton.disabled = false;
+                        submitButton.innerHTML = '<i class="fas fa-save mr-2"></i>Simpan API Key';
                     }
                 });
 
@@ -6003,12 +6056,22 @@
                 document.getElementById('nextQuestionBtn').innerHTML = AppState.currentQuestion === AppState.questions.length - 1 ? 'Selesai <i class="fas fa-flag-checkered ml-2"></i>' : 'Selanjutnya <i class="fas fa-chevron-right ml-2"></i>';
                 
                 questionContent.querySelectorAll('input[name="answer"], textarea[name="answer"]').forEach(input => {
-                    input.addEventListener('change', () => {
+                    // Use 'input' event for real-time updates on text/textarea
+                    const eventType = (input.type === 'radio') ? 'change' : 'input';
+                    input.addEventListener(eventType, () => {
                         if (input.type === 'radio') AppState.examAnswers[AppState.currentQuestion] = parseInt(input.value);
                         else AppState.examAnswers[AppState.currentQuestion] = input.value;
                         this.updateQuestionNavigation();
                         this.updateProgress();
                     });
+                    // Also listen to change event for radio buttons and final blur
+                    if (input.type !== 'radio') {
+                        input.addEventListener('change', () => {
+                            AppState.examAnswers[AppState.currentQuestion] = input.value;
+                            this.updateQuestionNavigation();
+                            this.updateProgress();
+                        });
+                    }
                 });
             },
 
@@ -6016,10 +6079,15 @@
                 const navigationModal = document.getElementById('questionListModalContent');
                 if (!navigationModal) return;
                 navigationModal.innerHTML = Array.from({ length: AppState.questions.length }, (_, i) => {
+                    const isAnswered = AppState.examAnswers[i] !== undefined && AppState.examAnswers[i] !== '';
+                    const isCurrent = i === AppState.currentQuestion;
+                    // Priority: if answered, show green (answered). Current indicator shown via border.
                     let stateClass = 'unanswered';
-                    if (i === AppState.currentQuestion) stateClass = 'current';
-                    else if (AppState.examAnswers[i] !== undefined && AppState.examAnswers[i] !== '') stateClass = 'answered';
-                    return `<button class="question-nav-btn w-12 h-12 rounded-full border-2 text-sm font-bold ${stateClass}" onclick="UI.goToQuestionFromModal(${i})">${i + 1}</button>`;
+                    if (isAnswered) stateClass = 'answered';
+                    else if (isCurrent) stateClass = 'current';
+                    // Add extra styling for current question
+                    const currentBorder = isCurrent ? 'ring-2 ring-offset-2 ring-blue-500' : '';
+                    return `<button class="question-nav-btn w-12 h-12 rounded-full border-2 text-sm font-bold ${stateClass} ${currentBorder}" onclick="UI.goToQuestionFromModal(${i})">${i + 1}</button>`;
                 }).join('');
             },
 
