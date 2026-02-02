@@ -931,6 +931,10 @@
                 try {
                     switch (action) {
                         case 'add':
+                            // Special case: blockedStudents uses 'blockStudent' action
+                            if (storeName === 'blockedStudents') {
+                                return await callGoogleScript('POST', { action: 'blockStudent', data: data });
+                            }
                             return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
                         case 'addBatch':
                             // Untuk results, GAS expects 'addResults' (plural), bukan 'addResult'
@@ -942,6 +946,10 @@
                             // Special case: GAS expects 'addQuestionsBatch' action name
                             return await callGoogleScript('POST', { action: 'addQuestionsBatch', data: data });
                         case 'update':
+                            // Special case: settings uses 'saveSettings' action
+                            if (storeName === 'settings') {
+                                return await callGoogleScript('POST', { action: 'saveSettings', data: data });
+                            }
                             const updateResult = await callGoogleScript('POST', { action: `update${this.capitalize(storeName)}`, data: data });
                             // Smart retry: jika UPDATE gagal dengan "not found", coba CREATE
                             if (updateResult.status !== 'success' && updateResult.message?.includes('not found')) {
