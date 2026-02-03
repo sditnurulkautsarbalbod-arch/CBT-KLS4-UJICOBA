@@ -9,6 +9,12 @@ var SPREADSHEET_ID = '1SuVpC5zb1wUtOgsLj_QwSwqNy0ggTDWZy_9XoFKbIQg';
 var DRIVE_FOLDER_ID = '1JSTyQugX_8qbpKLquvL6BLSps6NrlHCV';
 
 // =================================================================
+// DUPLICATE CHECK CACHE (UNTUK VALIDASI)
+// =================================================================
+var CACHE_NAME = 'duplicate_check_cache';
+var CACHE_DURATION = 300; // 5 menit
+
+// =================================================================
 // SHEET NAMES CONFIGURATION
 // =================================================================
 var SHEETS = {
@@ -42,6 +48,21 @@ function doGet(e) {
         });
       case 'getSettings':
         return createJsonResponse({ status: 'success', data: getSettings(e.parameter) });
+
+      // Dashboard Monitoring Actions (NEW)
+      case 'getDashboardStatistics':
+        return createJsonResponse({ status: 'success', data: getDashboardStatistics() });
+      case 'getExamStatistics':
+        return createJsonResponse({ status: 'success', data: getExamStatistics(e.parameter) });
+      case 'getStudentStatistics':
+        return createJsonResponse({ status: 'success', data: getStudentStatistics(e.parameter) });
+      case 'getRealtimeMonitoring':
+        return createJsonResponse({ status: 'success', data: getRealtimeMonitoring() });
+      case 'exportResults':
+        return exportResultsAsExcel(e.parameter);
+      case 'exportGrades':
+        return exportGradesAsExcel(e.parameter);
+
       default:
         if (!action) {
           return createJsonResponse({ status: 'info', message: 'Skrip berjalan. Silakan akses melalui URL aplikasi web.' });
@@ -236,22 +257,87 @@ function saveExamResultBatch(resultsData) {
 
   var sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEETS.RESULTS);
   var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  
+  var resultIdColIndex = headers.indexOf('resultId');
+
+  // VALIDASI: Cek duplicate ID sebelum insert
+  var duplicateIds = checkDuplicateResultIds(sheet, resultsData, resultIdColIndex);
+
+  if (duplicateIds.length > 0) {
+    Logger.log('Duplicate result IDs detected: ' + duplicateIds.join(', '));
+    throw new Error('Duplicate entries found for result IDs: ' + duplicateIds.join(', '));
+  }
+
   var rowsToAdd = resultsData.map(function(result) {
     return headers.map(function(header) {
       var value = result[header] !== undefined ? result[header] : '';
-      
+
       if (header === 'jawabanSiswa' && value !== '') {
         return "'" + value;
       }
-      
+
       return value;
     });
   });
 
   if (rowsToAdd.length > 0) {
     sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAdd.length, headers.length).setValues(rowsToAdd);
+    Logger.log('Successfully added ' + rowsToAdd.length + ' results to sheet');
   }
+}
+
+// =================================================================
+// DUPLICATE CHECK HELPER (UNTUK VALIDASI)
+// =================================================================
+
+function checkDuplicateResultIds(sheet, resultsData, resultIdColIndex) {
+  if (resultIdColIndex === -1) {
+    Logger.log('Warning: resultId column not found');
+    return [];
+  }
+
+  var lastRow = sheet.getLastRow();
+  var existingIds = [];
+
+  // Cek existing IDs di sheet
+  if (lastRow > 1) {
+    existingIds = sheet.getRange(2, resultIdColIndex + 1, lastRow - 1, 1).getValues()
+      .flat()
+      .map(function(id) {
+        return String(id).trim();
+      });
+  }
+
+  // Cek duplicate dalam data baru dan dengan existing data
+  var duplicateIds = [];
+
+  // Track IDs dalam data baru
+  var newIdsMap = {};
+
+  resultsData.forEach(function(result) {
+    var id = result.resultId;
+    if (id) {
+      var idStr = String(id).trim();
+
+      // Cek duplicate dengan existing data
+      if (existingIds.includes(idStr)) {
+        duplicateIds.push(idStr);
+      }
+
+      // Cek duplicate dalam data baru
+      if (newIdsMap[idStr]) {
+        duplicateIds.push(idStr);
+      } else {
+        newIdsMap[idStr] = true;
+      }
+    }
+  });
+
+  // Remove duplicates
+  duplicateIds = duplicateIds.filter(function(value, index, self) {
+    return self.indexOf(value) === index;
+  });
+
+  return duplicateIds;
 }
 
 function updateResultsBatch(updates) {
@@ -782,4 +868,370 @@ function recalculateStudentGrade(studentName, examCode) {
     grade: grade,
     keterangan: keterangan
   };
+}
+
+// =================================================================
+// DASHBOARD MONITORING FUNCTIONS (NEW - UNTUK ADMIN DASHBOARD)
+// =================================================================
+
+function getDashboardStatistics() {
+  try {
+    var results = getSheetData(SHEETS.RESULTS);
+    var grades = getSheetData(SHEETS.GRADES);
+    var questions = getSheetData(SHEETS.QUESTIONS);
+    var blocked = getSheetData(SHEETS.BLOCKED_STUDENTS);
+
+    var totalStudents = results.length > 0 ? getUniqueValues(results, 'namaLengkap').length : 0;
+    var totalExams = results.length > 0 ? getUniqueValues(results, 'kodesoal').length : 0;
+
+    // Hitung statistik nilai
+    var scores = grades.map(function(g) { return Number(g.nilai) || 0; }).filter(function(s) { return s > 0; });
+    var avgScore = scores.length > 0 ? Math.round(scores.reduce(function(a, b) { return a + b; }, 0) / scores.length) : 0;
+    var maxScore = scores.length > 0 ? Math.max.apply(Math, scores) : 0;
+    var minScore = scores.length > 0 ? Math.min.apply(Math, scores) : 0;
+
+    // Hitung grade distribution
+    var gradeDist = { A: 0, B: 0, C: 0, D: 0, E: 0 };
+    grades.forEach(function(g) {
+      if (gradeDist[g.grade] !== undefined) {
+        gradeDist[g.grade]++;
+      }
+    });
+
+    // Hitung pass/fail
+    var pass = grades.filter(function(g) { return g.keterangan === 'Lulus'; }).length;
+    var fail = grades.filter(function(g) { return g.keterangan === 'Tidak Lulus'; }).length;
+
+    return {
+      totalStudents: totalStudents,
+      totalExams: totalExams,
+      totalResults: results.length,
+      totalQuestions: questions.length,
+      totalBlocked: blocked.length,
+      averageScore: avgScore,
+      maxScore: maxScore,
+      minScore: minScore,
+      gradeDistribution: gradeDist,
+      passCount: pass,
+      failCount: fail,
+      passRate: grades.length > 0 ? Math.round((pass / grades.length) * 100) : 0
+    };
+  } catch(error) {
+    Logger.log('Error getting dashboard statistics: ' + error.toString());
+    return {
+      totalStudents: 0,
+      totalExams: 0,
+      totalResults: 0,
+      totalQuestions: 0,
+      totalBlocked: 0,
+      averageScore: 0,
+      maxScore: 0,
+      minScore: 0,
+      gradeDistribution: { A: 0, B: 0, C: 0, D: 0, E: 0 },
+      passCount: 0,
+      failCount: 0,
+      passRate: 0
+    };
+  }
+}
+
+function getExamStatistics(params) {
+  try {
+    var examCode = params.examCode;
+    var allResults = getSheetData(SHEETS.RESULTS);
+    var results = examCode ? allResults.filter(function(r) { return r.kodesoal === examCode; }) : allResults;
+    var allGrades = getSheetData(SHEETS.GRADES);
+    var grades = examCode ? allGrades.filter(function(g) { return g.kodeSoal === examCode; }) : allGrades;
+
+    // Group by exam
+    var exams = {};
+    allResults.forEach(function(r) {
+      if (!exams[r.kodesoal]) {
+        exams[r.kodesoal] = {
+          code: r.kodesoal,
+          subject: r.mataPelajaran || '-',
+          totalStudents: 0,
+          completedCount: 0,
+          scores: []
+        };
+      }
+      exams[r.kodesoal].totalStudents++;
+      if (r.status === 'Selesai') {
+        exams[r.kodesoal].completedCount++;
+      }
+    });
+
+    // Calculate scores
+    grades.forEach(function(g) {
+      if (exams[g.kodeSoal]) {
+        exams[g.kodeSoal].scores.push(Number(g.nilai) || 0);
+      }
+    });
+
+    // Calculate statistics per exam
+    var examStats = [];
+    for (var code in exams) {
+      var exam = exams[code];
+      var scores = exam.scores.filter(function(s) { return s > 0; });
+      var avg = scores.length > 0 ? Math.round(scores.reduce(function(a, b) { return a + b; }, 0) / scores.length) : 0;
+
+      examStats.push({
+        code: exam.code,
+        subject: exam.subject,
+        totalStudents: exam.totalStudents,
+        completedStudents: exam.completedCount,
+        inProgressStudents: exam.totalStudents - exam.completedCount,
+        averageScore: avg,
+        completionRate: exam.totalStudents > 0 ? Math.round((exam.completedCount / exam.totalStudents) * 100) : 0
+      });
+    }
+
+    return {
+      examStatistics: examStats,
+      totalExams: examStats.length
+    };
+  } catch(error) {
+    Logger.log('Error getting exam statistics: ' + error.toString());
+    return { examStatistics: [], totalExams: 0 };
+  }
+}
+
+function getStudentStatistics(params) {
+  try {
+    var studentName = params.studentName;
+    var allResults = getSheetData(SHEETS.RESULTS);
+    var results = studentName ? allResults.filter(function(r) { return r.namaLengkap === studentName; }) : allResults;
+    var allGrades = getSheetData(SHEETS.GRADES);
+    var grades = studentName ? allGrades.filter(function(g) { return g.namaSiswa === studentName; }) : allGrades;
+
+    // Group by student
+    var students = {};
+    allResults.forEach(function(r) {
+      if (!students[r.namaLengkap]) {
+        students[r.namaLengkap] = {
+          name: r.namaLengkap,
+          kelas: r.kelas || '-',
+          totalExams: 0,
+          completedExams: 0,
+          grades: []
+        };
+      }
+      students[r.namaLengkap].totalExams++;
+      if (r.status === 'Selesai') {
+        students[r.namaLengkap].completedExams++;
+      }
+    });
+
+    // Add grades
+    grades.forEach(function(g) {
+      if (students[g.namaSiswa]) {
+        students[g.namaSiswa].grades.push({
+          examCode: g.kodeSoal,
+          subject: g.mataPelajaran || '-',
+          score: Number(g.nilai) || 0,
+          grade: g.grade,
+          keterangan: g.keterangan,
+          waktuSelesai: g.waktuSelesai
+        });
+      }
+    });
+
+    // Calculate averages
+    var studentStats = [];
+    for (var name in students) {
+      var student = students[name];
+      var scores = student.grades.map(function(g) { return g.score; }).filter(function(s) { return s > 0; });
+      var avgScore = scores.length > 0 ? Math.round(scores.reduce(function(a, b) { return a + b; }, 0) / scores.length) : 0;
+
+      studentStats.push({
+        name: student.name,
+        kelas: student.kelas,
+        totalExams: student.totalExams,
+        completedExams: student.completedExams,
+        averageScore: avgScore,
+        grades: student.grades
+      });
+    }
+
+    // Sort by average score descending
+    studentStats.sort(function(a, b) { return b.averageScore - a.averageScore; });
+
+    return {
+      studentStatistics: studentStats,
+      totalStudents: studentStats.length
+    };
+  } catch(error) {
+    Logger.log('Error getting student statistics: ' + error.toString());
+    return { studentStatistics: [], totalStudents: 0 };
+  }
+}
+
+function getRealtimeMonitoring() {
+  try {
+    var results = getSheetData(SHEETS.RESULTS);
+    var blocked = getSheetData(SHEETS.BLOCKED_STUDENTS);
+    var now = new Date();
+
+    // Filter results from last 24 hours
+    var recentResults = results.filter(function(r) {
+      if (!r.waktuSelesai) return false;
+      try {
+        var finishTime = new Date(r.waktuSelesai);
+        var diffHours = (now - finishTime) / (1000 * 60 * 60);
+        return diffHours <= 24;
+      } catch(e) {
+        return false;
+      }
+    });
+
+    // Calculate completion status
+    var inProgress = results.filter(function(r) { return r.status !== 'Selesai'; }).length;
+    var completed = results.filter(function(r) { return r.status === 'Selesai'; }).length;
+    var pending = results.filter(function(r) { return !r.status || r.status === ''; }).length;
+
+    // Group by hour for chart
+    var hourlyData = {};
+    for (var i = 0; i < 24; i++) {
+      hourlyData[i] = 0;
+    }
+
+    recentResults.forEach(function(r) {
+      if (r.waktuSelesai) {
+        try {
+          var time = new Date(r.waktuSelesai);
+          var hour = time.getHours();
+          hourlyData[hour]++;
+        } catch(e) {}
+      }
+    });
+
+    return {
+      timestamp: now.toISOString(),
+      totalActive: results.length,
+      inProgress: inProgress,
+      completed: completed,
+      pending: pending,
+      blockedCount: blocked.length,
+      recentCompletions: recentResults.length,
+      hourlyData: hourlyData,
+      recentResults: recentResults.slice(0, 10) // Last 10 completions
+    };
+  } catch(error) {
+    Logger.log('Error getting realtime monitoring: ' + error.toString());
+    return {
+      timestamp: new Date().toISOString(),
+      totalActive: 0,
+      inProgress: 0,
+      completed: 0,
+      pending: 0,
+      blockedCount: 0,
+      recentCompletions: 0,
+      hourlyData: {},
+      recentResults: []
+    };
+  }
+}
+
+// =================================================================
+// EXPORT FUNCTIONS (NEW - UNTUK ADMIN DASHBOARD)
+// =================================================================
+
+function exportResultsAsExcel(params) {
+  try {
+    var examCode = params.examCode;
+    var results = getSheetData(SHEETS.RESULTS);
+    var filteredResults = examCode ? results.filter(function(r) { return r.kodesoal === examCode; }) : results;
+
+    if (filteredResults.length === 0) {
+      throw new Error('No results found');
+    }
+
+    // Create CSV content
+    var headers = Object.keys(filteredResults[0]);
+    var csvContent = headers.join(',') + '\n';
+
+    filteredResults.forEach(function(r) {
+      var row = headers.map(function(h) {
+        var val = r[h] || '';
+        // Escape commas and quotes
+        val = String(val).replace(/"/g, '""');
+        if (val.includes(',') || val.includes('"') || val.includes('\n')) {
+          val = '"' + val + '"';
+        }
+        return val;
+      });
+      csvContent += row.join(',') + '\n';
+    });
+
+    // Create blob
+    var blob = Utilities.newBlob(csvContent, 'text/csv', 'results_export_' + (examCode || 'all') + '_' + new Date().getTime() + '.csv');
+
+    return ContentService.createTextOutput(JSON.stringify({
+      status: 'success',
+      message: 'Export successful',
+      data: Utilities.base64Encode(blob.getBytes()),
+      filename: blob.getName(),
+      mimeType: 'text/csv'
+    })).setMimeType(ContentService.MimeType.JSON);
+
+  } catch(error) {
+    Logger.log('Error exporting results: ' + error.toString());
+    return createJsonResponse({ status: 'error', message: error.message });
+  }
+}
+
+function exportGradesAsExcel(params) {
+  try {
+    var examCode = params.examCode;
+    var grades = getSheetData(SHEETS.GRADES);
+    var filteredGrades = examCode ? grades.filter(function(g) { return g.kodeSoal === examCode; }) : grades;
+
+    if (filteredGrades.length === 0) {
+      throw new Error('No grades found');
+    }
+
+    // Create CSV content
+    var headers = Object.keys(filteredGrades[0]);
+    var csvContent = headers.join(',') + '\n';
+
+    filteredGrades.forEach(function(g) {
+      var row = headers.map(function(h) {
+        var val = g[h] || '';
+        val = String(val).replace(/"/g, '""');
+        if (val.includes(',') || val.includes('"') || val.includes('\n')) {
+          val = '"' + val + '"';
+        }
+        return val;
+      });
+      csvContent += row.join(',') + '\n';
+    });
+
+    var blob = Utilities.newBlob(csvContent, 'text/csv', 'grades_export_' + (examCode || 'all') + '_' + new Date().getTime() + '.csv');
+
+    return ContentService.createTextOutput(JSON.stringify({
+      status: 'success',
+      message: 'Export successful',
+      data: Utilities.base64Encode(blob.getBytes()),
+      filename: blob.getName(),
+      mimeType: 'text/csv'
+    })).setMimeType(ContentService.MimeType.JSON);
+
+  } catch(error) {
+    Logger.log('Error exporting grades: ' + error.toString());
+    return createJsonResponse({ status: 'error', message: error.message });
+  }
+}
+
+// =================================================================
+// HELPER FUNCTIONS (NEW)
+// =================================================================
+
+function getUniqueValues(array, key) {
+  var unique = {};
+  array.forEach(function(item) {
+    if (item[key]) {
+      unique[item[key]] = true;
+    }
+  });
+  return Object.keys(unique);
 }
