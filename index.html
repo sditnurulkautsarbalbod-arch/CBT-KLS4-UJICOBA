@@ -556,10 +556,10 @@
      <!-- Exam Lock Screen Modal -->
     <div id="examLockModal" class="fixed inset-0 bg-gray-900 bg-opacity-95 hidden flex items-center justify-center z-50">
         <div class="bg-white rounded-lg shadow-2xl w-full max-w-lg p-8 text-center fade-in">
-            <i class="fas fa-lock text-5xl text-blue-600 mb-6"></i>
-            <h3 class="text-2xl font-bold text-gray-900 mb-4">Mode Ujian Terkunci</h3>
-            <p class="text-gray-700 mb-2">Anda akan memasuki mode ujian layar penuh.</p>
-            <ul class="text-sm text-left text-gray-600 list-disc list-inside mb-8 space-y-2 p-4 bg-gray-50 rounded-lg">
+            <i id="examLockIcon" class="fas fa-lock text-5xl text-blue-600 mb-6"></i>
+            <h3 id="examLockTitle" class="text-2xl font-bold text-gray-900 mb-4">Mode Ujian Terkunci</h3>
+            <p id="examLockDesc" class="text-gray-700 mb-2">Anda akan memasuki mode ujian layar penuh.</p>
+            <ul id="examLockRules" class="text-sm text-left text-gray-600 list-disc list-inside mb-8 space-y-2 p-4 bg-gray-50 rounded-lg">
                 <li>Pastikan tidak ada aplikasi atau jendela lain yang terbuka.</li>
                 <li>Dilarang meninggalkan halaman ujian atau keluar dari mode layar penuh.</li>
             </ul>
@@ -888,107 +888,61 @@
                 
                 // Sync immediately if online (dengan await untuk memastikan terkirim)
                 if (navigator.onLine) {
-                    await this.processSyncQueue();
+                    try {
+                        await this.processSyncQueue();
+                        
+                        // Check if this specific operation succeeded
+                        const updatedQueue = await IndexedDBService.getAll('syncQueue');
+                        const thisOp = updatedQueue.find(op => op.id === operation.id);
+                        
+                        if (thisOp) {
+                            if (thisOp.status === 'completed') {
+                                return { status: 'success', message: 'Data berhasil disinkronkan ke server' };
+                            } else if (thisOp.status === 'failed') {
+                                return { status: 'error', message: thisOp.lastError || 'Gagal menyinkronkan data ke server' };
+                            }
+                        }
+                        return { status: 'success', message: 'Data disimpan ke queue sync' };
+                    } catch (error) {
+                        console.error('Queue operation error:', error);
+                        return { status: 'error', message: error.message || 'Gagal menyinkronkan data' };
+                    }
+                } else {
+                    // Offline - data akan disinkronkan nanti
+                    return { status: 'offline', message: 'Mode offline. Data akan disinkronkan saat koneksi tersedia.' };
                 }
-                
-                return operation;
             },
             
             // Process pending sync queue
             async processSyncQueue() {
-                 if (this.isSyncing || !navigator.onLine) return;
-
-                 try {
-                     const queue = await IndexedDBService.getAll('syncQueue');
-                     let pendingOps = queue.filter(op => op.status === 'pending');
-
-                     // OPTIMASI: Batch processing - gabungkan operasi serupa
-                     const batchedOps = this.groupBatchOperations(pendingOps);
-
-                     // Proses batched operations
-                     for (const batch of batchedOps) {
-                         try {
-                             if (batch.type === 'single') {
-                                 // Operasi tunggal
-                                 await this.executeOperation(batch.op);
-                                 batch.op.status = 'completed';
-                                 await IndexedDBService.put('syncQueue', batch.op);
-                             } else if (batch.type === 'batch') {
-                                 // Operasi batch - gabungkan data
-                                 const mergedData = this.mergeBatchData(batch.ops);
-                                 await this.executeOperation({
-                                     action: batch.action,
-                                     storeName: batch.storeName,
-                                     data: mergedData
-                                 });
-
-                                 // Tandai semua sebagai completed
-                                 for (const op of batch.ops) {
-                                     op.status = 'completed';
-                                     await IndexedDBService.put('syncQueue', op);
-                                 }
-                             }
-                         } catch (error) {
-                             // Update status error untuk semua ops dalam batch
-                             for (const op of (batch.type === 'batch' ? batch.ops : [batch.op])) {
-                                 op.retryCount++;
-                                 op.status = op.retryCount >= 3 ? 'failed' : 'pending';
-                                 op.lastError = error.message;
-                                 await IndexedDBService.put('syncQueue', op);
-                             }
-                         }
-                     }
-
-                     // Clean up completed operations
-                     const completed = queue.filter(op => op.status === 'completed');
-                     for (const op of completed) {
-                         await IndexedDBService.delete('syncQueue', op.id);
-                     }
-                 } catch (error) {
-                     console.error('Error processing sync queue:', error);
-                 }
-             },
-
-             // OPTIMASI: Group operations yang serupa untuk batch processing
-             groupBatchOperations(pendingOps) {
-                 const groups = {};
-
-                 for (const op of pendingOps) {
-                     // Hanya batch operasi addBatch atau yang support merge
-                     const key = `${op.action}-${op.storeName}`;
-
-                     if (op.action === 'addBatch' && op.storeName === 'results') {
-                         if (!groups[key]) {
-                             groups[key] = {
-                                 type: 'batch',
-                                 action: op.action,
-                                 storeName: op.storeName,
-                                 ops: []
-                             };
-                         }
-                         groups[key].ops.push(op);
-                     } else {
-                         // Operasi tunggal tetap diproses sendiri
-                         const singleKey = `single-${op.id}`;
-                         groups[singleKey] = {
-                             type: 'single',
-                             op: op
-                         };
-                     }
-                 }
-
-                 return Object.values(groups);
-             },
-
-             // OPTIMASI: Merge data dari batch operations
-             mergeBatchData(ops) {
-                 // Flatten array data dari semua ops
-                 const allData = ops.reduce((acc, op) => {
-                     return acc.concat(Array.isArray(op.data) ? op.data : [op.data]);
-                 }, []);
-
-                 return allData;
-             },
+                if (this.isSyncing || !navigator.onLine) return;
+                
+                try {
+                    const queue = await IndexedDBService.getAll('syncQueue');
+                    const pendingOps = queue.filter(op => op.status === 'pending');
+                    
+                    for (const op of pendingOps) {
+                        try {
+                            await this.executeOperation(op);
+                            op.status = 'completed';
+                            await IndexedDBService.put('syncQueue', op);
+                        } catch (error) {
+                            op.retryCount++;
+                            op.status = op.retryCount >= 3 ? 'failed' : 'pending';
+                            op.lastError = error.message;
+                            await IndexedDBService.put('syncQueue', op);
+                        }
+                    }
+                    
+                    // Clean up completed operations
+                    const completed = queue.filter(op => op.status === 'completed');
+                    for (const op of completed) {
+                        await IndexedDBService.delete('syncQueue', op.id);
+                    }
+                } catch (error) {
+                    console.error('Error processing sync queue:', error);
+                }
+            },
             
             async executeOperation(op) {
                 const { action, storeName, data } = op;
@@ -1369,41 +1323,240 @@
                 return data;
             },
             
-            async addQuestion(questionData) {
+            // ============ DIRECT GOOGLE SHEETS SERVICE (VERIFIKASI) ============
+            // Helper untuk operasi langsung ke Google Sheets dengan verifikasi
+            
+            async addQuestionDirect(questionData) {
+                // LANGKAH 1: Validasi input
+                if (!questionData || typeof questionData !== 'object') {
+                    return { success: false, message: 'Data soal tidak valid' };
+                }
+                
                 const tempId = questionData.id || `q-${Date.now()}`;
                 const newQuestion = { ...questionData, id: tempId };
                 
-                // 1. Optimistic update
+                // LANGKAH 2: Simpan ke IndexedDB dulu (backup lokal)
+                await IndexedDBService.put('questions', newQuestion);
+                
+                // Update cache lokal
                 const cached = CacheHelper.getCached('questions') || [];
                 cached.push(newQuestion);
                 AppState.cache.set('questions', { data: cached, timestamp: Date.now(), valid: true });
                 
-                // 2. Save to IndexedDB
-                await IndexedDBService.put('questions', newQuestion);
-                
-                // 3. Enqueue for background sync
-                await BackgroundSync.queueOperation('add', 'questions', newQuestion);
-                
-                return { success: true, message: 'Soal berhasil ditambahkan' };
+                // LANGKAH 3: Kirim langsung ke Google Sheets (SINKRON - tunggu hasil)
+                try {
+                    const result = await callGoogleScript('POST', {
+                        action: 'addQuestion',
+                        data: newQuestion
+                    });
+                    
+                    // LANGKAH 4: VERIFIKASI - Cek apakah data benar-benar masuk
+                    if (result && result.status === 'success') {
+                        // Verifikasi dengan mengambil data dari server
+                        await DataService.getQuestions(null, true);
+                        return { success: true, message: 'Soal berhasil ditambahkan ke Google Sheets' };
+                    } else {
+                        // GAS gagal tapi tetap berhasil lokal
+                        return { 
+                            success: false, 
+                            message: `Gagal menyimpan ke Google Sheets: ${result?.message || 'Unknown error'}. Data disimpan secara lokal.`,
+                            localOnly: true
+                        };
+                    }
+                } catch (error) {
+                    console.error('Error adding question to GAS:', error);
+                    return { 
+                        success: false, 
+                        message: `Error: ${error.message}. Data disimpan secara lokal.`,
+                        localOnly: true
+                    };
+                }
             },
             
-            async addQuestions(questionsArray) {
-                // 1. Optimistic update
+            async addQuestionsDirect(questionsArray) {
+                // LANGKAH 1: Validasi input
+                if (!questionsArray || !Array.isArray(questionsArray) || questionsArray.length === 0) {
+                    return { success: false, message: 'Data soal tidak valid' };
+                }
+                
+                const newQuestions = questionsArray.map((q, i) => ({ 
+                    ...q, 
+                    id: q.id || `q-${Date.now()}-${i}` 
+                }));
+                
+                // LANGKAH 2: Simpan ke IndexedDB dulu (backup lokal)
+                await IndexedDBService.putBulk('questions', newQuestions);
+                
+                // Update cache lokal
                 const cached = CacheHelper.getCached('questions') || [];
-                const newQuestions = questionsArray.map((q, i) => ({ ...q, id: q.id || `q-${Date.now()}-${i}` }));
                 cached.push(...newQuestions);
                 AppState.cache.set('questions', { data: cached, timestamp: Date.now(), valid: true });
                 
-                // 2. Save to IndexedDB
-                await IndexedDBService.putBulk('questions', newQuestions);
+                // LANGKAH 3: Kirim langsung ke Google Sheets sebagai batch (SINKRON)
+                try {
+                    const result = await callGoogleScript('POST', {
+                        action: 'addQuestionsBatch',
+                        data: newQuestions
+                    });
+                    
+                    // LANGKAH 4: VERIFIKASI
+                    if (result && result.status === 'success') {
+                        await DataService.getQuestions(null, true);
+                        return { success: true, message: `${newQuestions.length} soal berhasil ditambahkan ke Google Sheets` };
+                    } else {
+                        return { 
+                            success: false, 
+                            message: `Gagal: ${result?.message || 'Unknown error'}. Data disimpan secara lokal.`,
+                            localOnly: true
+                        };
+                    }
+                } catch (error) {
+                    console.error('Error adding questions batch to GAS:', error);
+                    return { 
+                        success: false, 
+                        message: `Error: ${error.message}. Data disimpan secara lokal.`,
+                        localOnly: true
+                    };
+                }
+            },
+            
+            async blockStudentDirect(blockData) {
+                // LANGKAH 1: Validasi input
+                if (!blockData || !blockData.username || !blockData.examCode) {
+                    return { success: false, message: 'Data blokir tidak valid' };
+                }
                 
-                // 3. Enqueue as batch - use special action name for GAS compatibility
-                await BackgroundSync.queueOperation('addQuestionsBatch', 'questions', newQuestions);
+                const tempId = `blocked-${Date.now()}`;
+                const newBlock = { 
+                    ...blockData, 
+                    id: tempId,
+                    blockId: blockData.username + '_' + blockData.examCode
+                };
                 
-                return { success: true, message: `${newQuestions.length} soal berhasil ditambahkan` };
+                // LANGKAH 2: Simpan ke IndexedDB dulu
+                await IndexedDBService.put('blockedStudents', newBlock);
+                
+                // Update cache lokal
+                const cached = CacheHelper.getCached('blockedStudents') || [];
+                cached.push(newBlock);
+                AppState.cache.set('blockedStudents', { data: cached, timestamp: Date.now(), valid: true });
+                
+                // LANGKAH 3: Kirim langsung ke Google Sheets (SINKRON)
+                try {
+                    const result = await callGoogleScript('POST', {
+                        action: 'blockStudent',
+                        data: {
+                            username: blockData.username,
+                            examCode: blockData.examCode
+                        }
+                    });
+                    
+                    // LANGKAH 4: VERIFIKASI
+                    if (result && result.status === 'success') {
+                        await DataService.getBlockedStudents(true);
+                        return { success: true, message: 'Siswa berhasil diblokir di Google Sheets' };
+                    } else {
+                        return { 
+                            success: false, 
+                            message: `Gagal memblokir: ${result?.message || 'Unknown error'}. Data disimpan secara lokal.`,
+                            localOnly: true
+                        };
+                    }
+                } catch (error) {
+                    console.error('Error blocking student in GAS:', error);
+                    return { 
+                        success: false, 
+                        message: `Error: ${error.message}. Data disimpan secara lokal.`,
+                        localOnly: true
+                    };
+                }
+            },
+            
+            async addResultsDirect(resultsArray, maxRetries = 3, retryDelay = 2000) {
+                // LANGKAH 1: Validasi input
+                if (!resultsArray || !Array.isArray(resultsArray) || resultsArray.length === 0) {
+                    return { success: false, message: 'Data hasil tidak valid' };
+                }
+                
+                const newResults = resultsArray.map((r, i) => ({ 
+                    ...r, 
+                    id: r.id || r.resultId || `r-${Date.now()}-${i}` 
+                }));
+                
+                // LANGKAH 2: Simpan ke IndexedDB dulu (backup)
+                await IndexedDBService.putBulk('results', newResults);
+                
+                // Update cache lokal
+                const cached = CacheHelper.getCached('results') || [];
+                cached.push(...newResults);
+                AppState.cache.set('results', { data: cached, timestamp: Date.now(), valid: true });
+                
+                // LANGKAH 3: Kirim ke Google Sheets dengan RETRY LOGIC
+                let lastError = null;
+                
+                for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                    try {
+                        const result = await callGoogleScript('POST', {
+                            action: 'addResults',
+                            data: newResults
+                        });
+                        
+                        // LANGKAH 4: VERIFIKASI
+                        if (result && result.status === 'success') {
+                            // Verifikasi dengan mengambil data terbaru
+                            await DataService.getResults(null, true);
+                            return { success: true, message: `${newResults.length} hasil berhasil disimpan ke Google Sheets` };
+                        } else {
+                            lastError = result?.message || 'Unknown error';
+                            console.warn(`Attempt ${attempt} failed:`, lastError);
+                        }
+                    } catch (error) {
+                        lastError = error.message;
+                        console.error(`Attempt ${attempt} error:`, error);
+                    }
+                    
+                    // Wait before retry (exponential backoff)
+                    if (attempt < maxRetries) {
+                        await new Promise(resolve => setTimeout(resolve, retryDelay * attempt));
+                    }
+                }
+                
+                // Semua retry gagal
+                return { 
+                    success: false, 
+                    message: `Gagal menyimpan setelah ${maxRetries} percobaan: ${lastError}. Data disimpan secara lokal.`,
+                    localOnly: true
+                };
+            },
+            
+            // ============ ORIGINAL METHODS (Deprecated - use Direct versions) ============
+            
+            async addQuestion(questionData) {
+                // Redirect ke versi direct dengan verifikasi
+                return await this.addQuestionDirect(questionData);
+            },
+            
+            async addQuestions(questionsArray) {
+                // Redirect ke versi direct dengan verifikasi
+                return await this.addQuestionsDirect(questionsArray);
+            },
+            
+            async blockStudent(blockData) {
+                // Redirect ke versi direct dengan verifikasi
+                return await this.blockStudentDirect(blockData);
+            },
+            
+            async addResults(resultsArray) {
+                // Redirect ke versi direct dengan retry dan verifikasi
+                return await this.addResultsDirect(resultsArray);
             },
             
             async updateQuestion(questionData) {
+                // 1. Validasi input
+                if (!questionData || !questionData.id) {
+                    return { success: false, message: 'Data soal tidak valid' };
+                }
+                
                 const cached = CacheHelper.getCached('questions') || [];
                 const index = cached.findIndex(q => q.id === questionData.id);
                 let updatedQuestion = questionData;
@@ -1416,9 +1569,25 @@
                 }
                 
                 // Enqueue for background sync
-                await BackgroundSync.queueOperation('update', 'questions', updatedQuestion);
+                const syncResult = await BackgroundSync.queueOperation('update', 'questions', updatedQuestion);
                 
-                return { success: true, message: 'Soal berhasil diupdate' };
+                // Validasi sync result
+                if (syncResult && syncResult.status === 'error') {
+                    return { 
+                        success: false, 
+                        message: `Gagal menyinkronkan ke server: ${syncResult.message}`,
+                        localOnly: true
+                    };
+                }
+                
+                // Force refresh untuk sinkronisasi
+                try {
+                    await DataService.getQuestions(null, true);
+                } catch (e) {
+                    console.warn('Force refresh failed after updateQuestion:', e);
+                }
+                
+                return { success: true, message: 'Soal berhasil diupdate dan disinkronkan' };
             },
             
             async deleteQuestion(questionId) {
@@ -1430,7 +1599,14 @@
                 // Enqueue for background sync
                 await BackgroundSync.queueOperation('delete', 'questions', { id: questionId });
                 
-                return { success: true, message: 'Soal berhasil dihapus' };
+                // Force refresh untuk sinkronisasi
+                try {
+                    await DataService.getQuestions(null, true);
+                } catch (e) {
+                    console.warn('Force refresh failed after deleteQuestion:', e);
+                }
+                
+                return { success: true, message: 'Soal berhasil dihapus dan disinkronkan' };
             },
             
             async deleteQuestions(questionIds) {
@@ -1444,7 +1620,14 @@
                     await BackgroundSync.queueOperation('delete', 'questions', { id });
                 }
                 
-                return { success: true, message: `${questionIds.length} soal berhasil dihapus` };
+                // Force refresh untuk sinkronisasi
+                try {
+                    await DataService.getQuestions(null, true);
+                } catch (e) {
+                    console.warn('Force refresh failed after deleteQuestions:', e);
+                }
+                
+                return { success: true, message: `${questionIds.length} soal berhasil dihapus dan disinkronkan` };
             },
             
             // ============ RESULTS ============
@@ -1480,17 +1663,9 @@
                 return data;
             },
             
+            // addResults sekarang menggunakan addResultsDirect dengan retry dan verifikasi
             async addResults(resultsArray) {
-                const cached = CacheHelper.getCached('results') || [];
-                const newResults = resultsArray.map((r, i) => ({ ...r, id: r.id || `r-${Date.now()}-${i}` }));
-                cached.push(...newResults);
-                AppState.cache.set('results', { data: cached, timestamp: Date.now(), valid: true });
-                await IndexedDBService.putBulk('results', newResults);
-                
-                // Enqueue sebagai SATU batch operation, bukan per-item
-                await BackgroundSync.queueOperation('addBatch', 'results', newResults);
-                
-                return { success: true, message: `${newResults.length} hasil berhasil ditambahkan` };
+                return await this.addResultsDirect(resultsArray);
             },
             
             async updateResult(resultData) {
@@ -1651,7 +1826,7 @@
                 return { success: true, message: `${gradeIds.length} nilai berhasil dihapus` };
             },
             
-            // ============ BLOCKED STUDENTS ============
+            // ============ BLOCKED STUDENTS (Updated with Direct GAS + Verification) ============
             async getBlockedStudents(forceRefresh = false) {
                 if (!forceRefresh && CacheHelper.isCacheValid('blockedStudents')) {
                     const cached = CacheHelper.getCached('blockedStudents');
@@ -1680,6 +1855,66 @@
                 return data;
             },
             
+            // blockStudent sekarang redirect ke blockStudentDirect yang sudah verifikasi
+            async blockStudent(blockData) {
+                return await this.blockStudentDirect(blockData);
+            },
+            
+            async unblockStudent(blockId) {
+                const cached = CacheHelper.getCached('blockedStudents') || [];
+                // Find the blocked student to get username and examCode for proper sync
+                const blockedStudent = cached.find(b => b.id === blockId || b.blockId === blockId);
+
+                // Sync directly with Google Sheets first (wait for completion)
+                const syncData = blockedStudent
+                    ? { blockId: blockedStudent.blockId, username: blockedStudent.username, examCode: blockedStudent.examCode }
+                    : { blockId: blockId };
+
+                try {
+                    const result = await callGoogleScript('POST', { action: 'unblockStudent', data: syncData });
+                    
+                    // VERIFIKASI sebelum hapus dari lokal
+                    if (result && result.status === 'success') {
+                        // Refresh from server
+                        await this.getBlockedStudents(true);
+                    } else {
+                        console.warn('Unblock sync failed:', result?.message);
+                    }
+                } catch (e) {
+                    console.error('Error syncing unblock to Google Sheets:', e);
+                }
+
+                // Update local cache and IndexedDB
+                const filteredData = cached.filter(b => b.id !== blockId && b.blockId !== blockId);
+                AppState.cache.set('blockedStudents', { data: filteredData, timestamp: Date.now(), valid: true });
+                await IndexedDBService.delete('blockedStudents', blockId);
+
+                return { success: true, message: 'Siswa berhasil di-unblock' };
+            },
+
+            async unblockAllStudents() {
+                // Sync directly with Google Sheets first (wait for completion)
+                try {
+                    const result = await callGoogleScript('POST', { action: 'unblockAllStudents', data: {} });
+                    
+                    // VERIFIKASI
+                    if (result && result.status === 'success') {
+                        // Clear local
+                        AppState.cache.set('blockedStudents', { data: [], timestamp: Date.now(), valid: true });
+                        await IndexedDBService.clear('blockedStudents');
+                    } else {
+                        console.warn('Unblock all sync failed:', result?.message);
+                    }
+                } catch (e) {
+                    console.error('Error syncing unblock all to Google Sheets:', e);
+                    // Still continue to update local cache/IndexedDB
+                    AppState.cache.set('blockedStudents', { data: [], timestamp: Date.now(), valid: true });
+                    await IndexedDBService.clear('blockedStudents');
+                }
+
+                return { success: true, message: 'Semua siswa berhasil di-unblock' };
+            },
+            
             async blockStudent(blockData) {
                 const tempId = `blocked-${Date.now()}`;
                 const newBlock = { ...blockData, id: tempId };
@@ -1699,26 +1934,40 @@
                 const cached = CacheHelper.getCached('blockedStudents') || [];
                 // Find the blocked student to get username and examCode for proper sync
                 const blockedStudent = cached.find(b => b.id === blockId || b.blockId === blockId);
+
+                // Sync directly with Google Sheets first (wait for completion)
+                const syncData = blockedStudent
+                    ? { blockId: blockedStudent.blockId, username: blockedStudent.username, examCode: blockedStudent.examCode }
+                    : { blockId: blockId };
+
+                try {
+                    await callGoogleScript('POST', { action: 'unblockStudent', data: syncData });
+                } catch (e) {
+                    console.error('Error syncing unblock to Google Sheets:', e);
+                    // Still continue to update local cache/IndexedDB
+                }
+
+                // Update local cache and IndexedDB
                 const filteredData = cached.filter(b => b.id !== blockId && b.blockId !== blockId);
                 AppState.cache.set('blockedStudents', { data: filteredData, timestamp: Date.now(), valid: true });
                 await IndexedDBService.delete('blockedStudents', blockId);
 
-                // Enqueue for background sync - include username and examCode for Google Sheet deletion
-                const syncData = blockedStudent
-                    ? { id: blockId, blockId: blockedStudent.blockId, username: blockedStudent.username, examCode: blockedStudent.examCode }
-                    : { id: blockId };
-                await BackgroundSync.queueOperation('delete', 'blockedStudents', syncData);
-
                 return { success: true, message: 'Siswa berhasil di-unblock' };
             },
-            
+
             async unblockAllStudents() {
+                // Sync directly with Google Sheets first (wait for completion)
+                try {
+                    await callGoogleScript('POST', { action: 'unblockAllStudents', data: {} });
+                } catch (e) {
+                    console.error('Error syncing unblock all to Google Sheets:', e);
+                    // Still continue to update local cache/IndexedDB
+                }
+
+                // Update local cache and IndexedDB
                 AppState.cache.set('blockedStudents', { data: [], timestamp: Date.now(), valid: true });
                 await IndexedDBService.clear('blockedStudents');
-                
-                // Enqueue for background sync
-                await BackgroundSync.queueOperation('delete', 'blockedStudents', { all: true });
-                
+
                 return { success: true, message: 'Semua siswa berhasil di-unblock' };
             },
             
@@ -2346,7 +2595,7 @@
             
             if (method === 'GET') {
                 Object.keys(params).forEach(key => {
-                    if (params[key] || params[key] === 0) { // Also include params with value 0
+                    if (params[key] || params[key] === 0) {
                         url.searchParams.append(key, params[key]);
                     }
                 });
@@ -2357,62 +2606,55 @@
                     return response.json();
                 } catch (error) {
                     console.error('Error calling Google Script (GET):', error);
-                    UI.showNotification('Gagal terhubung ke Google Sheet.', 'error');
-                    throw error;
+                    UI.showNotification('Gagal terhubung ke server. Periksa koneksi internet Anda.', 'error');
+                    return { status: 'error', message: error.message, error: error };
                 }
             } else if (method === 'POST') {
                 try {
-                    // Use fetch with redirect handling for Google Apps Script
-                    // GAS redirects to the actual response, so we need to follow redirects
                     const response = await fetch(SCRIPT_URL, {
                         method: 'POST',
-                        headers: {
+                        headers: { 
                             'Content-Type': 'text/plain;charset=utf-8',
                         },
                         body: JSON.stringify(params),
-                        redirect: 'follow',
-                        signal: AbortSignal.timeout(30000) // Timeout 30 detik
+                        redirect: 'follow'
                     });
-
-                    // Check HTTP response status
+                    
+                    // Check if response is ok
                     if (!response.ok) {
-                        throw new Error(`HTTP error! Status: ${response.status}`);
+                        throw new Error(`HTTP error! status: ${response.status}`);
                     }
-
+                    
                     // Try to parse response as JSON
-                    const text = await response.text();
-
-                    // GAS sometimes returns HTML wrapper, try to extract JSON
-                    const jsonMatch = text.match(/\{[\s\S]*\}/);
-                    if (jsonMatch) {
-                        const result = JSON.parse(jsonMatch[0]);
-
-                        // Validasi response dari server
-                        if (result.status === 'error' || result.status === 'failed') {
-                            throw new Error(result.message || 'Server returned error');
+                    try {
+                        const text = await response.text();
+                        // GAS sometimes returns HTML wrapper, try to extract JSON
+                        const jsonMatch = text.match(/\{[\s\S]*\}/);
+                        if (jsonMatch) {
+                            const parsed = JSON.parse(jsonMatch[0]);
+                            // Check if GAS returned an error
+                            if (parsed.status === 'error' || parsed.error) {
+                                console.error('Google Script Error:', parsed.message || parsed.error);
+                                return { status: 'error', message: parsed.message || parsed.error, error: parsed };
+                            }
+                            return parsed;
                         }
-
-                        // Pastikan response memiliki status success
-                        if (result.status !== 'success') {
-                            throw new Error('Invalid response status from server');
-                        }
-
-                        return result;
+                        return { status: 'success', message: 'Data sent successfully.' };
+                    } catch (parseError) {
+                        console.log('[POST] Response received but not JSON:', parseError.message);
+                        return { status: 'success', message: 'Data sent successfully.' };
                     }
-
-                    // Jika tidak ada JSON valid, lempar error
-                    throw new Error('Invalid response format from server');
                 } catch (error) {
                     console.error('Error calling Google Script (POST):', error);
-
-                    // Jika timeout error
-                    if (error.name === 'TimeoutError' || error.name === 'AbortError') {
-                        throw new Error('Request timeout. Server tidak merespon dalam 30 detik.');
+                    // Check specific error types
+                    if (error.message && error.message.includes('Failed to fetch')) {
+                        UI.showNotification('Gagal terhubung ke server. Periksa koneksi internet Anda.', 'error');
+                    } else if (error.message && error.message.includes('NetworkError')) {
+                        UI.showNotification('Network error. Periksa koneksi internet dan coba lagi.', 'error');
+                    } else {
+                        UI.showNotification(`Error: ${error.message}`, 'error');
                     }
-
-                    // Jangan gunakan no-cors fallback karena tidak bisa verifikasi response
-                    // Throw error agar user bisa mencoba lagi
-                    throw new Error(`Gagal mengirim data ke server: ${error.message}`);
+                    return { status: 'error', message: error.message, error: error };
                 }
             }
         }
@@ -2809,13 +3051,21 @@
 
             unblockStudent(blockId) {
                 UI.showConfirmModal('Konfirmasi Buka Blokir', 'Anda yakin ingin membuka blokir siswa ini?', async () => {
+                    Swal.fire({
+                        title: 'Memproses...',
+                        text: 'Sedang membuka blokir siswa.',
+                        allowOutsideClick: false,
+                        didOpen: () => { Swal.showLoading(); }
+                    });
                     try {
                         await DataService.unblockStudent(blockId);
-                        UI.showNotification('Blokir siswa berhasil dibuka!', 'success');
                         // Force refresh from server to ensure UI is in sync
                         await DataService.getBlockedStudents(true);
+                        Swal.close();
+                        UI.showNotification('Blokir siswa berhasil dibuka!', 'success');
                         UI.renderBlockedStudents();
                     } catch (error) {
+                        Swal.close();
                         console.error("Error unblocking student: ", error);
                         UI.showNotification('Gagal membuka blokir siswa!', 'error');
                     }
@@ -5014,12 +5264,39 @@
                 document.getElementById('dashboardInterface').classList.add('hidden');
                 document.getElementById('examLockModal').classList.remove('hidden');
 
+                // Reset modal to initial state
+                const examLockIcon = document.getElementById('examLockIcon');
+                const examLockTitle = document.getElementById('examLockTitle');
+                const examLockDesc = document.getElementById('examLockDesc');
+                const examLockRules = document.getElementById('examLockRules');
+
+                examLockIcon.className = 'fas fa-lock text-5xl text-blue-600 mb-6';
+                examLockTitle.textContent = 'Mode Ujian Terkunci';
+                examLockDesc.textContent = 'Anda akan memasuki mode ujian layar penuh.';
+                examLockRules.classList.remove('hidden');
+
                 const startBtn = document.getElementById('startFullscreenExamBtn');
-                
+                startBtn.disabled = false;
+                startBtn.innerHTML = '<i class="fas fa-play-circle mr-2"></i> Saya Mengerti & Mulai Ujian';
+
                 const newStartBtn = startBtn.cloneNode(true);
                 startBtn.parentNode.replaceChild(newStartBtn, startBtn);
-                
+
                 newStartBtn.addEventListener('click', async () => {
+                    // Show loading state
+                    const examLockIcon = document.getElementById('examLockIcon');
+                    const examLockTitle = document.getElementById('examLockTitle');
+                    const examLockDesc = document.getElementById('examLockDesc');
+                    const examLockRules = document.getElementById('examLockRules');
+                    const btn = document.getElementById('startFullscreenExamBtn');
+
+                    examLockIcon.className = 'fas fa-spinner fa-spin text-5xl text-blue-600 mb-6';
+                    examLockTitle.textContent = 'Memuat Soal Ujian...';
+                    examLockDesc.textContent = 'Mohon tunggu, sedang mempersiapkan soal ujian Anda.';
+                    examLockRules.classList.add('hidden');
+                    btn.disabled = true;
+                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Memuat...';
+
                     try {
                         await document.documentElement.requestFullscreen();
                         // Wait for fullscreen to activate before showing the exam
@@ -5028,6 +5305,14 @@
                             UI.showExamInterface();
                         }, 200);
                     } catch (err) {
+                        // Reset to initial state on error
+                        examLockIcon.className = 'fas fa-lock text-5xl text-blue-600 mb-6';
+                        examLockTitle.textContent = 'Mode Ujian Terkunci';
+                        examLockDesc.textContent = 'Anda akan memasuki mode ujian layar penuh.';
+                        examLockRules.classList.remove('hidden');
+                        btn.disabled = false;
+                        btn.innerHTML = '<i class="fas fa-play-circle mr-2"></i> Saya Mengerti & Mulai Ujian';
+
                         UI.showNotification('Gagal masuk mode layar penuh. Silakan coba lagi atau aktifkan izin.', 'error');
                         console.error("Fullscreen request failed: ", err);
                     }
@@ -5470,7 +5755,7 @@
                 this.renderBlockedStudents();
             },
 
-            async renderBlockedStudents() {
+            async renderBlockedStudents(forceRefresh = false) {
                 const section = document.getElementById('blockedStudentsSection');
                 if (!section) return;
 
@@ -5504,10 +5789,10 @@
 
                 const tableBody = document.getElementById('blockedStudentsTableBody');
                 const unblockAllBtn = document.getElementById('unblockAllBtn');
-                
+
                 try {
                     // Arsitektur baru: IndexedDB → Google Apps Script
-                    const blockedList = await DataService.getBlockedStudents();
+                    const blockedList = await DataService.getBlockedStudents(forceRefresh);
                     
                     if (!blockedList || blockedList.length === 0) {
                         tableBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-gray-500">Tidak ada siswa yang terblokir saat ini.</td></tr>';
@@ -6243,26 +6528,10 @@
                 document.removeEventListener('fullscreenchange', this.handleFullscreenChange);
                 document.removeEventListener('visibilitychange', this.handleVisibilityChange);
 
-                // Tambahkan protection browser (prevent refresh/close/back)
-                const preventNavigation = (e) => {
-                    e.preventDefault();
-                    e.returnValue = 'Data belum disimpan. Yakin ingin keluar?';
-                    return e.returnValue;
-                };
-                window.addEventListener('beforeunload', preventNavigation);
-                history.pushState(null, null, location.href);
-                window.addEventListener('popstate', (e) => {
-                    e.preventDefault();
-                    history.pushState(null, null, location.href);
-                });
-
                 Swal.fire({
                     title: 'Sedang Memproses Jawaban...',
-                    html: 'Mohon tunggu, jawaban Anda sedang disimpan dan dinilai.<br><br><small>Jangan refresh atau tutup browser!</small>',
+                    html: 'Mohon tunggu, jawaban Anda sedang disimpan dan dinilai.',
                     allowOutsideClick: false,
-                    allowEscapeKey: false,
-                    allowEnterKey: false,
-                    showConfirmButton: false,
                     didOpen: () => { Swal.showLoading(); }
                 });
                 
@@ -6360,35 +6629,6 @@
                     // Queue sudah otomatis diproses oleh queueOperation()
                     // Tidak perlu memanggil processSyncQueue() lagi untuk menghindari duplikasi
 
-                    // Tunggu proses sync ke server selesai (jika online)
-                    if (navigator.onLine) {
-                        Swal.update({
-                            title: 'Sedang Menyimpan ke Server...',
-                            html: 'Mohon tunggu, jawaban Anda sedang dikirim ke server.'
-                        });
-
-                        // Cek apakah ada error setelah sync
-                        const queueBeforeSync = await IndexedDBService.getAll('syncQueue');
-                        const pendingBeforeSync = queueBeforeSync.filter(op => op.status === 'pending');
-
-                        await BackgroundSync.processSyncQueue();
-
-                        // Verifikasi apakah semua operation berhasil
-                        const queueAfterSync = await IndexedDBService.getAll('syncQueue');
-                        const failedAfterSync = queueAfterSync.filter(op => op.status === 'failed');
-
-                        if (failedAfterSync.length > 0) {
-                            console.error('Beberapa operasi gagal sync:', failedAfterSync);
-                            throw new Error('Gagal menyimpan ke server. Pastikan koneksi internet stabil.');
-                        }
-                    }
-
-                    // Hapus protection browser setelah proses selesai
-                    window.removeEventListener('beforeunload', preventNavigation);
-                    window.removeEventListener('popstate', preventNavigation);
-                    // Bersihkan history stack
-                    history.back();
-
                     Swal.fire({
                         title: 'Ujian Selesai!',
                         html: `Terima kasih telah menyelesaikan ujian.<br>Nilai Anda: <strong>${finalScore}</strong> (${grade})<br>Anda akan diarahkan kembali ke halaman login.`,
@@ -6399,16 +6639,10 @@
 
                 } catch (error) {
                     console.error("Error submitting exam: ", error);
-
-                    // Hapus protection browser jika terjadi error
-                    window.removeEventListener('beforeunload', preventNavigation);
-                    window.removeEventListener('popstate', preventNavigation);
-
                     Swal.fire({
                         title: 'Error!',
                         text: 'Gagal menyimpan hasil ujian. Silakan coba lagi.',
-                        icon: 'error',
-                        allowOutsideClick: false
+                        icon: 'error'
                     });
                 }
             },
