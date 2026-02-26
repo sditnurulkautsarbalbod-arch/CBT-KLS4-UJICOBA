@@ -913,7 +913,7 @@
                 }
             },
             
-            // Process pending sync queue
+            // Process pending sync queue (with more retries for exam results)
             async processSyncQueue() {
                 if (this.isSyncing || !navigator.onLine) return;
                 
@@ -926,10 +926,24 @@
                             await this.executeOperation(op);
                             op.status = 'completed';
                             await IndexedDBService.put('syncQueue', op);
+                            console.log(`✅ Sync completed for ${op.action} - ${op.storeName}`);
                         } catch (error) {
+                            // Tentukan max retry berdasarkan tipe data
+                            // Results: 10x retry (penting!)
+                            // Others: 3x retry
+                            const maxRetries = (op.storeName === 'results') ? 10 : 3;
+                            
                             op.retryCount++;
-                            op.status = op.retryCount >= 3 ? 'failed' : 'pending';
                             op.lastError = error.message;
+                            
+                            if (op.retryCount >= maxRetries) {
+                                op.status = 'failed';
+                                console.error(`❌ Sync FAILED after ${maxRetries} retries for ${op.action}:`, error.message);
+                            } else {
+                                op.status = 'pending';
+                                console.warn(`⚠️ Sync retry ${op.retryCount}/${maxRetries} for ${op.action}:`, error.message);
+                            }
+                            
                             await IndexedDBService.put('syncQueue', op);
                         }
                     }
@@ -938,6 +952,12 @@
                     const completed = queue.filter(op => op.status === 'completed');
                     for (const op of completed) {
                         await IndexedDBService.delete('syncQueue', op.id);
+                    }
+                    
+                    // Log failed operations yang masih tersisa
+                    const failed = queue.filter(op => op.status === 'failed');
+                    if (failed.length > 0) {
+                        console.warn(`⚠️ ${failed.length} sync operations permanently failed. Data mungkin perlu di-sync manual.`);
                     }
                 } catch (error) {
                     console.error('Error processing sync queue:', error);
@@ -6605,14 +6625,36 @@
                         return result;
                     });
                     
-                    // Arsitektur baru: Simpan ke IndexedDB dulu, lalu sync ke server
-                    await DataService.addResults(preparedResults);
-
+                    // ========== SYNC QUEUE UNTUK RETRY LATER ==========
+                    // Jika gagal, simpan ke queue untuk retry otomatis saat online
+                    
+                    async function queueForLaterSync(results) {
+                        // Simpan ke syncQueue di IndexedDB dengan status 'pending'
+                        const queueData = {
+                            id: `queue-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                            action: 'addResults',
+                            data: results,
+                            timestamp: Date.now(),
+                            status: 'pending',
+                            retryCount: 0,
+                            maxRetries: 10 // Coba retry hingga 10 kali
+                        };
+                        await IndexedDBService.put('syncQueue', queueData);
+                        console.log('Results queued for later sync:', queueData.id);
+                        return queueData;
+                    }
+                    
+                    // ========== SUBMIT DENGAN VERIFIKASI ==========
+                    
+                    // Kirim hasil dengan retry dan verifikasi
+                    const resultResponse = await DataService.addResultsDirect(preparedResults, 3, 2000);
+                    
                     // Save final grade summary
                     const finalScore = AppState.questions.length > 0 ? Math.round(totalScore / AppState.questions.length) : 0;
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    await DataService.addGrade({
+                    // Kirim grade juga dengan retry
+                    const gradeResponse = await DataService.addGrade({
                         gradeId: `${Date.now()}-${AppState.currentUser.username}-${AppState.selectedExamCode}`,
                         kelas: AppState.currentUser.kelas,
                         namaSiswa: AppState.currentUser.nama,
@@ -6625,17 +6667,42 @@
                         keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus',
                         waktuSelesai: new Date().toLocaleString('id-ID')
                     });
-
-                    // Queue sudah otomatis diproses oleh queueOperation()
-                    // Tidak perlu memanggil processSyncQueue() lagi untuk menghindari duplikasi
-
-                    Swal.fire({
-                        title: 'Ujian Selesai!',
-                        html: `Terima kasih telah menyelesaikan ujian.<br>Nilai Anda: <strong>${finalScore}</strong> (${grade})<br>Anda akan diarahkan kembali ke halaman login.`,
-                        icon: 'success',
-                        confirmButtonText: 'OK',
-                        allowOutsideClick: false
-                    }).then(() => Auth.logout());
+                    
+                    // ========== CEK HASIL & TAMPILKAN NOTIFIKASI YANG SESUAI ==========
+                    
+                    if (resultResponse.success) {
+                        // ✅ BERHASIL - Data sudah di Google Sheets
+                        Swal.fire({
+                            title: 'Ujian Selesai!',
+                            html: `Terima kasih telah menyelesaikan ujian.<br>Nilai Anda: <strong>${finalScore}</strong> (${grade})<br><br><span class="text-green-600"><i class="fas fa-check-circle"></i> Jawaban berhasil disimpan ke Google Sheets</span><br>Anda akan diarahkan kembali ke halaman login.`,
+                            icon: 'success',
+                            confirmButtonText: 'OK',
+                            allowOutsideClick: false
+                        }).then(() => Auth.logout());
+                        
+                    } else if (resultResponse.localOnly) {
+                        // ⚠️ GAGAL TETAPI TERSIMPAN LOKAL - Akan di-sync nanti
+                        // Queue untuk retry otomatis
+                        await queueForLaterSync(preparedResults);
+                        
+                        Swal.fire({
+                            title: 'Ujian Selesai! (Mode Offline)',
+                            html: `Terima kasih telah menyelesaikan ujian.<br>Nilai Anda: <strong>${finalScore}</strong> (${grade})<br><br><span class="text-orange-600"><i class="fas fa-exclamation-triangle"></i> Jawaban disimpan secara lokal.</span><br>Akan otomatis dikirim ke Google Sheets saat koneksi stabil.<br><br><small>${resultResponse.message}</small><br>Anda akan diarahkan kembali ke halaman login.`,
+                            icon: 'warning',
+                            confirmButtonText: 'OK',
+                            allowOutsideClick: false
+                        }).then(() => Auth.logout());
+                        
+                    } else {
+                        // ❌ ERROR FATAL
+                        Swal.fire({
+                            title: 'Peringatan!',
+                            html: `Terima kasih telah menyelesaikan ujian.<br>Nilai Anda: <strong>${finalScore}</strong> (${grade})<br><br><span class="text-red-600"><i class="fas fa-times-circle"></i> Gagal menyimpan jawaban.</span><br>Silakan hubungi guru/admin untuk membantu.<br><br><small>${resultResponse.message}</small>`,
+                            icon: 'error',
+                            confirmButtonText: 'Saya Mengerti',
+                            allowOutsideClick: false
+                        }).then(() => Auth.logout());
+                    }
 
                 } catch (error) {
                     console.error("Error submitting exam: ", error);
