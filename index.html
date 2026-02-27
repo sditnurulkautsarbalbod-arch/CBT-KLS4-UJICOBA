@@ -3255,21 +3255,24 @@
                         }
                         delete questionData.gambarFile;
 
-                        // ========== KIRIM KE GOOGLE SHEETS - TRUST GAS RESPONSE ==========
-                        // Jika GAS return success, berarti tersimpan. Tidak perlu verifikasi rumit.
+                        // ========== KIRIM SEKALI - TANPA RETRY LOOP ==========
                         
-                        const submitBtnOriginalText = submitButton.innerHTML;
+                        const btnOriginalText = submitButton.innerHTML;
                         submitButton.disabled = true;
-                        submitButton.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i>Menyimpan ke Google Sheets...`;
+                        submitButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Menyimpan...';
+
+                        // Generate ID unik untuk soal
+                        questionData.id = `q-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                        questionData.createdAt = new Date().toISOString();
 
                         try {
-                            // Kirim ke GAS - Sekali saja, trust response
+                            // Kirim ke GAS - Sekali saja
                             const result = await callGoogleScript('POST', {
                                 action: 'addQuestion',
                                 data: questionData
                             });
                             
-                            // Simpan ke IndexedDB juga (backup lokal)
+                            // Simpan ke IndexedDB (backup lokal)
                             await IndexedDBService.put('questions', questionData);
                             
                             // Update cache lokal
@@ -3290,52 +3293,23 @@
                             if (result && result.status === 'success') {
                                 UI.hideModal();
                                 UI.showNotification('✅ 1 soal berhasil ditambahkan!', 'success');
-                                UI.loadAndRenderPaginatedQuestions();
                             } else {
-                                // GAS gagal tapi data sudah di-IndexedDB
                                 UI.hideModal();
-                                UI.showNotification('⚠️ 1 soal disimpan di browser (belum terkirim ke server)', 'warning');
-                                UI.loadAndRenderPaginatedQuestions();
+                                UI.showNotification('⚠️ 1 soal disimpan di browser', 'warning');
                             }
+                            UI.loadAndRenderPaginatedQuestions();
                         } catch (error) {
                             console.error("Error adding question: ", error);
-                            // Error - data sudah tersimpan di IndexedDB
                             UI.hideModal();
-                            UI.showNotification('⚠️ 1 soal disimpan di browser (error: ' + error.message + ')', 'warning');
-                            UI.loadAndRenderPaginatedQuestions();
+                            UI.showNotification('⚠️ Error: ' + error.message, 'error');
                         } finally {
                             submitButton.disabled = false;
-                            submitButton.innerHTML = submitBtnOriginalText;
+                            submitButton.innerHTML = btnOriginalText;
                         }
                     });
             },
 
             async viewQuestion(id) {
-                const cacheKey = AppState.cache.generateKey('questions', AppState.filters.questions);
-                const allFilteredQuestions = AppState.cache.get(cacheKey);
-                
-                if (!allFilteredQuestions) {
-                    UI.showNotification('Cache soal tidak ditemukan. Silakan filter ulang.', 'error');
-                    return;
-                }
-                const question = allFilteredQuestions.find(q => q.id === id);
-
-                if (!question) {
-                    UI.showNotification('Soal tidak ditemukan', 'error');
-                    return;
-                }
-                
-                let optionsHtml = '';
-                if (question.tipe === 'pilihan_ganda' && Array.isArray(question.pilihan)) {
-                    optionsHtml = `
-                        <div class="mt-4">
-                            <h5 class="font-semibold text-gray-700 mb-2">Pilihan Jawaban:</h5>
-                            <ul class="list-disc list-inside space-y-2">
-                                ${question.pilihan.map((opt, index) => `
-                                    <li class="${index === question.correct ? 'font-bold text-green-600' : ''}">
-                                        ${String.fromCharCode(65 + index)}. ${opt} ${index === question.correct ? '(Jawaban Benar)' : ''}
-                                    </li>
-                                `).join('')}
                             </ul>
                         </div>
                     `;
@@ -3817,69 +3791,96 @@
                     }));
 
                     try {
-                        // ========== KIRIM BATCH - LEBIH CEPAT & ANTI DUPLIKAT ==========
+                        // ========== KIRIM WAJIB DENGAN VERIFIKASI (BATCH) ==========
                         
-                        // Generate ID unik untuk semua soal SEBELUM dikirim
-                        const batchId = `batch-${Date.now()}`;
-                        questionsToSave.forEach((q, i) => {
-                            q.id = `${batchId}-${i}`;
-                            q.createdAt = new Date().toISOString();
-                        });
-
-                        // Update button
-                        button.disabled = true;
-                        button.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i>Mengirim ke Google Sheets...`;
-
-                        // Kirim SEMUA soal dalam SATU request batch
+                        const maxAttempts = 8;
+                        const baseDelay = 2000;
+                        let attempt = 0;
                         let isVerified = false;
                         let lastError = '';
                         
-                        for (let attempt = 1; attempt <= 3; attempt++) {
-                            try {
-                                const result = await callGoogleScript('POST', {
-                                    action: 'addQuestionsBatch',
-                                    data: questionsToSave
-                                });
+                        // Update button
+                        button.disabled = true;
+                        button.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i>Mengirim ke Google Sheets... (0/${questionsToSave.length})`;
+                        
+                        // Kirim per-soal dengan verifikasi
+                        const savedQuestions = [];
+                        const failedQuestions = [];
+                        
+                        for (let i = 0; i < questionsToSave.length; i++) {
+                            const q = questionsToSave[i];
+                            q.id = q.id || `q-${Date.now()}-${i}`;
+                            
+                            // Reset attempts untuk setiap soal
+                            attempt = 0;
+                            let qVerified = false;
+                            
+                            while (attempt < maxAttempts && !qVerified) {
+                                attempt++;
                                 
-                                if (result && result.status === 'success') {
-                                    // Verifikasi: cek apakah soal dengan batch ID ada di Sheets
-                                    const verifyResult = await callGoogleScript('GET', {
-                                        action: 'getQuestions',
-                                        kode: metadata.kodeSoal
+                                try {
+                                    const result = await callGoogleScript('POST', {
+                                        action: 'addQuestion',
+                                        data: q
                                     });
                                     
-                                    if (verifyResult && verifyResult.status === 'success' && 
-                                        verifyResult.data && verifyResult.data.length > 0) {
-                                        console.log('✅ Batch questions verified!');
-                                        isVerified = true;
-                                        break;
+                                    if (result && result.status === 'success') {
+                                        // Verifikasi
+                                        const verifyResult = await callGoogleScript('GET', {
+                                            action: 'getQuestions',
+                                            id: q.id
+                                        });
+                                        
+                                        if (verifyResult && verifyResult.status === 'success' && 
+                                            verifyResult.data && verifyResult.data.length > 0) {
+                                            qVerified = true;
+                                            savedQuestions.push(q);
+                                        }
                                     }
-                                } else {
-                                    lastError = result?.message || 'Server error';
+                                } catch (e) {
+                                    console.warn(`Question ${i+1} attempt ${attempt} failed:`, e);
                                 }
-                            } catch (error) {
-                                lastError = error.message;
-                                console.warn(`Batch attempt ${attempt} failed:`, error);
+                                
+                                if (!qVerified && attempt < maxAttempts) {
+                                    await new Promise(resolve => setTimeout(resolve, baseDelay));
+                                }
                             }
                             
-                            if (!isVerified && attempt < 3) {
-                                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                            if (!qVerified) {
+                                failedQuestions.push(q);
                             }
+                            
+                            // Update progress
+                            button.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i>Mengirim ke Google Sheets... (${savedQuestions.length + failedQuestions.length}/${questionsToSave.length})`;
                         }
                         
-                        // Simpan ke IndexedDB无论成功与否 (untuk backup)
-                        await IndexedDBService.putBulk('questions', questionsToSave);
-                        const cached = CacheHelper.getCached('questions') || [];
-                        cached.push(...questionsToSave);
-                        AppState.cache.set('questions', { data: cached, timestamp: Date.now(), valid: true });
+                        // Simpan yang berhasil ke IndexedDB
+                        if (savedQuestions.length > 0) {
+                            await IndexedDBService.putBulk('questions', savedQuestions);
+                            const cached = CacheHelper.getCached('questions') || [];
+                            cached.push(...savedQuestions);
+                            AppState.cache.set('questions', { data: cached, timestamp: Date.now(), valid: true });
+                        }
+                        
+                        // Simpan yang gagal ke queue untuk retry
+                        if (failedQuestions.length > 0) {
+                            for (const fq of failedQuestions) {
+                                await IndexedDBService.put('questions', fq);
+                            }
+                        }
                         
                         AppState.cache.clear(); 
                         UI.hideGeminiModal();
                         
-                        if (isVerified) {
-                            UI.showNotification(`✅ ${questionsToSave.length} soal berhasil ditambahkan ke Google Sheets!`, 'success');
+                        if (savedQuestions.length === questionsToSave.length) {
+                            // Semua berhasil
+                            UI.showNotification(`✅ ${questionsToSave.length} soal berhasil ditambahkan dan tersimpan di Google Sheets!`, 'success');
+                        } else if (savedQuestions.length > 0) {
+                            // Sebagian berhasil
+                            UI.showNotification(`${savedQuestions.length}/${questionsToSave.length} soal berhasil tersimpan. ${failedQuestions.length} soal disimpan lokal.`, 'warning');
                         } else {
-                            UI.showNotification(`⚠️ ${questionsToSave.length} soal disimpan secara lokal.`, 'warning');
+                            // Semua gagal
+                            UI.showNotification(`⚠️ Gagal mengirim ke Google Sheets. ${questionsToSave.length} soal disimpan lokal.`, 'error');
                         }
                         
                         UI.loadAndRenderPaginatedQuestions();
