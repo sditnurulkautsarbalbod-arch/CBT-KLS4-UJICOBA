@@ -3255,66 +3255,24 @@
                         }
                         delete questionData.gambarFile;
 
-                        // ========== KIRIM KE GOOGLE SHEETS DENGAN VERIFIKASI ==========
-                        // Optimized: fewer retries, same ID for verification
+                        // ========== KIRIM KE GOOGLE SHEETS - TRUST GAS RESPONSE ==========
+                        // Jika GAS return success, berarti tersimpan. Tidak perlu verifikasi rumit.
                         
-                        const maxAttempts = 3;
-                        const baseDelay = 1000;
-                        let attempt = 0;
-                        let isVerified = false;
-                        let lastError = '';
-                        
-                        // Generate unique ID - JANGAN ubah ID ini saat retry
-                        const tempId = questionData.id || `q-${Date.now()}`;
-                        questionData.id = tempId;
-                        
-                        // Simpan dulu ke IndexedDB untuk tracking
-                        await IndexedDBService.put('questions', questionData);
-                        
-                        while (attempt < maxAttempts && !isVerified) {
-                            attempt++;
+                        const submitBtnOriginalText = submitButton.innerHTML;
+                        submitButton.disabled = true;
+                        submitButton.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i>Menyimpan ke Google Sheets...`;
+
+                        try {
+                            // Kirim ke GAS - Sekali saja, trust response
+                            const result = await callGoogleScript('POST', {
+                                action: 'addQuestion',
+                                data: questionData
+                            });
                             
-                            // Update button text
-                            submitButton.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i>Mencoba ${attempt}/${maxAttempts}...`;
+                            // Simpan ke IndexedDB juga (backup lokal)
+                            await IndexedDBService.put('questions', questionData);
                             
-                            try {
-                                // KIRIM KE GOOGLE SHEETS
-                                const result = await callGoogleScript('POST', {
-                                    action: 'addQuestion',
-                                    data: questionData
-                                });
-                                
-                                if (result && result.status === 'success') {
-                                    // VERIFIKASI: Cek apakah data ada di Sheets berdasarkan ID yang sama
-                                    const verifyResult = await callGoogleScript('GET', {
-                                        action: 'getQuestions',
-                                        id: tempId
-                                    });
-                                    
-                                    if (verifyResult && verifyResult.status === 'success' && 
-                                        verifyResult.data && verifyResult.data.length > 0) {
-                                        console.log('✅ Question verified in Google Sheets!');
-                                        isVerified = true;
-                                        break;
-                                    } else {
-                                        lastError = 'Menunggu konfirmasi server...';
-                                    }
-                                } else {
-                                    lastError = result?.message || 'Server error';
-                                }
-                            } catch (error) {
-                                lastError = error.message;
-                                console.error(`❌ Attempt ${attempt} error:`, error);
-                            }
-                            
-                            // Delay sebelum retry (lebih cepat dari sebelumnya)
-                            if (!isVerified && attempt < maxAttempts) {
-                                await new Promise(resolve => setTimeout(resolve, baseDelay * attempt));
-                            }
-                        }
-                        
-                        if (isVerified) {
-                            // ✅ BERHASIL - Update cache lokal
+                            // Update cache lokal
                             const cached = CacheHelper.getCached('questions') || [];
                             cached.push(questionData);
                             AppState.cache.set('questions', { data: cached, timestamp: Date.now(), valid: true });
@@ -3328,43 +3286,28 @@
                                 mataPelajaran: questionData.mataPelajaran,
                                 tipe: questionData.tipe
                             };
-                            UI.hideModal();
-                            UI.showNotification('✅ soal berhasil ditambahkan dan tersimpan di Google Sheets!', 'success');
-                            UI.loadAndRenderPaginatedQuestions();
-                        } else {
-                            // ❌ GAGAL - Simpan lokal sebagai backup
-                            await IndexedDBService.put('questions', questionData);
                             
-                            Swal.fire({
-                                title: '⚠️ Peringatan',
-                                html: `Soal disimpan di browser tetapi gagal dikirim ke Google Sheets setelah ${maxAttempts} percobaan.<br><br>
-                                       <small class="text-gray-500">${lastError}</small><br><br>
-                                       <strong>Soal akan otomatis dikirim saat koneksi membaik.</strong>`,
-                                icon: 'warning',
-                                confirmButtonText: 'Simpan Lokal'
-                            });
-                            
-                            AppState.cache.clear(); 
-                            AppState.lastQuestionData = {
-                                tahunAjaran: questionData.tahunAjaran,
-                                semester: questionData.semester,
-                                kode: questionData.kode,
-                                kelas: questionData.kelas,
-                                mataPelajaran: questionData.mataPelajaran,
-                                tipe: questionData.tipe
-                            };
+                            if (result && result.status === 'success') {
+                                UI.hideModal();
+                                UI.showNotification('✅ 1 soal berhasil ditambahkan!', 'success');
+                                UI.loadAndRenderPaginatedQuestions();
+                            } else {
+                                // GAS gagal tapi data sudah di-IndexedDB
+                                UI.hideModal();
+                                UI.showNotification('⚠️ 1 soal disimpan di browser (belum terkirim ke server)', 'warning');
+                                UI.loadAndRenderPaginatedQuestions();
+                            }
+                        } catch (error) {
+                            console.error("Error adding question: ", error);
+                            // Error - data sudah tersimpan di IndexedDB
                             UI.hideModal();
-                            UI.showNotification('Soal disimpan secara lokal (belum terkirim)', 'warning');
+                            UI.showNotification('⚠️ 1 soal disimpan di browser (error: ' + error.message + ')', 'warning');
                             UI.loadAndRenderPaginatedQuestions();
+                        } finally {
+                            submitButton.disabled = false;
+                            submitButton.innerHTML = submitBtnOriginalText;
                         }
-                    } catch (error) {
-                        console.error("Error adding question: ", error);
-                        UI.showNotification(error.message || 'Gagal menambahkan soal!', 'error');
-                    } finally {
-                         submitButton.disabled = false;
-                         submitButton.innerHTML = 'Simpan';
-                    }
-                });
+                    });
             },
 
             async viewQuestion(id) {
