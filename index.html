@@ -3310,6 +3310,31 @@
             },
 
             async viewQuestion(id) {
+                const cacheKey = AppState.cache.generateKey('questions', AppState.filters.questions);
+                const allFilteredQuestions = AppState.cache.get(cacheKey);
+                
+                if (!allFilteredQuestions) {
+                    UI.showNotification('Cache soal tidak ditemukan. Silakan filter ulang.', 'error');
+                    return;
+                }
+                const question = allFilteredQuestions.find(q => q.id === id);
+
+                if (!question) {
+                    UI.showNotification('Soal tidak ditemukan', 'error');
+                    return;
+                }
+                
+                let optionsHtml = '';
+                if (question.tipe === 'pilihan_ganda' && Array.isArray(question.pilihan)) {
+                    optionsHtml = `
+                        <div class="mt-4">
+                            <h5 class="font-semibold text-gray-700 mb-2">Pilihan Jawaban:</h5>
+                            <ul class="list-disc list-inside space-y-2">
+                                ${question.pilihan.map((opt, index) => `
+                                    <li class="${index === question.correct ? 'font-bold text-green-600' : ''}">
+                                        ${String.fromCharCode(65 + index)}. ${opt} ${index === question.correct ? '(Jawaban Benar)' : ''}
+                                    </li>
+                                `).join('')}
                             </ul>
                         </div>
                     `;
