@@ -7532,12 +7532,19 @@
             const passwordInput = document.getElementById('password');
             const loginError = document.getElementById('loginError');
 
-            // Initialize SyncManager first
-            await SyncManager.init();
+            try {
+                // Initialize SyncManager first
+                SyncManager.init();
+            } catch(e) { console.error('SyncManager init error:', e); }
             
-            // Initialize IndexedDB dan BackgroundSync
-            await IndexedDBService.init();
-            BackgroundSync.init();
+            try {
+                // Initialize IndexedDB dan BackgroundSync
+                await IndexedDBService.init();
+            } catch(e) { console.error('IndexedDB init error:', e); }
+            
+            try {
+                BackgroundSync.init();
+            } catch(e) { console.error('BackgroundSync init error:', e); }
 
             // Show loading state while fetching user data
             loginButton.disabled = true;
@@ -7692,6 +7699,7 @@
         window.IndexedDBService = IndexedDBService;
         window.BackgroundSync = BackgroundSync;
         window.DataService = DataService;
+        window.SyncManager = SyncManager;
     </script>
 </body>
 </html>
