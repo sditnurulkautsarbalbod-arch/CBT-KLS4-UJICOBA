@@ -434,7 +434,7 @@
                 <div class="bg-gradient-to-r from-cyan-500 to-teal-500 text-white py-4 px-6 rounded-2xl mb-4 shadow-lg">
                     <h1 class="text-xl font-bold tracking-wide">🏫 SD IT NURUL KAUTSAR</h1>
                 </div>
-                <h2 class="text-2xl font-bold bg-gradient-to-r from-cyan-600 to-teal-600 bg-clip-text text-transparent">UJIAN ONLINE KELAS 4</h2>
+                <h2 class="text-2xl font-bold bg-gradient-to-r from-cyan-600 to-teal-600 bg-clip-text text-transparent">UJIAN ONLINE KELAS 5</h2>
             </div>
             
             <!-- Login Form -->
@@ -973,6 +973,21 @@
                             // Special case: blockedStudents uses 'blockStudent' action
                             if (storeName === 'blockedStudents') {
                                 return await callGoogleScript('POST', { action: 'blockStudent', data: data });
+                            }
+                            // Special case: grades action name bisa berbeda antar versi GAS
+                            if (storeName === 'grades') {
+                                let addGradeResult = await callGoogleScript('POST', { action: 'addGrade', data: data });
+                                if (addGradeResult && addGradeResult.status === 'success') {
+                                    return addGradeResult;
+                                }
+
+                                const fallbackGradeResult = await callGoogleScript('POST', { action: 'addGrades', data: data });
+                                if (fallbackGradeResult && fallbackGradeResult.status === 'success') {
+                                    return fallbackGradeResult;
+                                }
+
+                                const finalGradeResult = fallbackGradeResult || addGradeResult;
+                                throw new Error(finalGradeResult?.message || 'Gagal menyimpan nilai ke server');
                             }
                             return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
                         case 'addBatch':
@@ -1750,19 +1765,117 @@
                 return data;
             },
             
-            async addGrade(gradeData) {
-                const tempId = gradeData.id || `g-${Date.now()}`;
-                const newGrade = { ...gradeData, id: tempId };
-                
+            async addGradeDirect(gradeData, maxRetries = 5, retryDelay = 1500) {
+                if (!gradeData || typeof gradeData !== 'object') {
+                    return { success: false, message: 'Data nilai tidak valid' };
+                }
+
+                const tempId = gradeData.gradeId || gradeData.id || `g-${Date.now()}`;
+                const newGrade = {
+                    ...gradeData,
+                    gradeId: gradeData.gradeId || tempId,
+                    id: gradeData.id || tempId
+                };
+
                 const cached = CacheHelper.getCached('grades') || [];
-                cached.push(newGrade);
+                const existingIndex = cached.findIndex(g =>
+                    g.id === newGrade.id ||
+                    g.gradeId === newGrade.gradeId ||
+                    (g.namaSiswa === newGrade.namaSiswa && g.kodeSoal === newGrade.kodeSoal)
+                );
+
+                if (existingIndex !== -1) {
+                    cached[existingIndex] = { ...cached[existingIndex], ...newGrade };
+                } else {
+                    cached.push(newGrade);
+                }
+
                 AppState.cache.set('grades', { data: cached, timestamp: Date.now(), valid: true });
                 await IndexedDBService.put('grades', newGrade);
-                
-                // Enqueue for background sync
-                await BackgroundSync.queueOperation('add', 'grades', newGrade);
-                
-                return { success: true, message: 'Nilai berhasil ditambahkan' };
+
+                let lastError = '';
+                let sendSucceeded = false;
+
+                for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                    try {
+                        if (!sendSucceeded) {
+                            let result = await callGoogleScript('POST', {
+                                action: 'addGrade',
+                                data: newGrade
+                            });
+
+                            if (!result || result.status !== 'success') {
+                                const fallbackResult = await callGoogleScript('POST', {
+                                    action: 'addGrades',
+                                    data: newGrade
+                                });
+                                if (fallbackResult && fallbackResult.status === 'success') {
+                                    result = fallbackResult;
+                                }
+                            }
+
+                            if (result && result.status === 'success') {
+                                sendSucceeded = true;
+                            } else {
+                                lastError = result?.message || 'Gagal menyimpan nilai ke server';
+                            }
+                        }
+
+                        if (sendSucceeded) {
+                            const verifyById = await this.getGrades({ gradeId: newGrade.gradeId }, true);
+                            const foundById = Array.isArray(verifyById) && verifyById.some(g =>
+                                g.gradeId === newGrade.gradeId || g.id === newGrade.gradeId || g.id === newGrade.id
+                            );
+
+                            if (foundById) {
+                                return { success: true, message: 'Nilai berhasil ditambahkan ke Google Sheets' };
+                            }
+
+                            const verifyByIdentity = await this.getGrades({
+                                namaSiswa: newGrade.namaSiswa,
+                                kodeSoal: newGrade.kodeSoal,
+                                tahunAjaran: newGrade.tahunAjaran,
+                                semester: newGrade.semester
+                            }, true);
+
+                            const foundByIdentity = Array.isArray(verifyByIdentity) && verifyByIdentity.some(g =>
+                                g.namaSiswa === newGrade.namaSiswa && g.kodeSoal === newGrade.kodeSoal
+                            );
+
+                            if (foundByIdentity) {
+                                return { success: true, message: 'Nilai berhasil ditambahkan ke Google Sheets' };
+                            }
+
+                            lastError = 'Menunggu konfirmasi data nilai di Google Sheets.';
+                        }
+                    } catch (error) {
+                        lastError = error.message;
+                    }
+
+                    if (attempt < maxRetries) {
+                        await new Promise(resolve => setTimeout(resolve, retryDelay * Math.min(attempt, 4)));
+                    }
+                }
+
+                const queueResult = await BackgroundSync.queueOperation('add', 'grades', newGrade);
+
+                if (queueResult && queueResult.status === 'error') {
+                    return {
+                        success: false,
+                        localOnly: true,
+                        message: `Nilai disimpan lokal, gagal sinkron ke Google Sheets: ${queueResult.message || lastError}`
+                    };
+                }
+
+                return {
+                    success: false,
+                    localOnly: true,
+                    message: `Nilai disimpan lokal. Sinkronisasi tertunda: ${lastError || 'Server belum mengonfirmasi penyimpanan.'}`
+                };
+            },
+
+            async addGrade(gradeData) {
+                return await this.addGradeDirect(gradeData);
             },
             
             async updateGrade(gradeData) {
@@ -2608,7 +2721,7 @@
         // =================================================================
         // GOOGLE SCRIPT HELPER
         // =================================================================
-        const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxUXn_HXwa6po6hJHeCoEZviObKQcDImpHNaWlgSnUs_abK0Y_cagXmOURXkoa8HUz53Q/exec';
+        const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwu3iYpI327GbCHcBiTxXt1c0MvUuDjmL-rh3EFvSGMvrY0EXM1-E-XgHJKdmw6GaGp/exec';
 
         async function callGoogleScript(method = 'GET', params = {}) {
             const url = new URL(SCRIPT_URL);
@@ -2659,10 +2772,18 @@
                             }
                             return parsed;
                         }
-                        return { status: 'success', message: 'Data sent successfully.' };
+                        return {
+                            status: 'error',
+                            message: 'Respons server tidak valid (non-JSON).',
+                            error: text
+                        };
                     } catch (parseError) {
                         console.log('[POST] Response received but not JSON:', parseError.message);
-                        return { status: 'success', message: 'Data sent successfully.' };
+                        return {
+                            status: 'error',
+                            message: `Gagal memproses respons server: ${parseError.message}`,
+                            error: parseError
+                        };
                     }
                 } catch (error) {
                     console.error('Error calling Google Script (POST):', error);
@@ -3255,58 +3376,41 @@
                         }
                         delete questionData.gambarFile;
 
-                        // ========== KIRIM SEKALI - TANPA RETRY LOOP ==========
-                        
-                        const btnOriginalText = submitButton.innerHTML;
-                        submitButton.disabled = true;
-                        submitButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Menyimpan...';
+                        const saveResult = await DataService.addQuestionDirect(questionData);
 
-                        // Generate ID unik untuk soal
-                        questionData.id = `q-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-                        questionData.createdAt = new Date().toISOString();
+                        AppState.cache.clear();
+                        AppState.lastQuestionData = {
+                            tahunAjaran: questionData.tahunAjaran,
+                            semester: questionData.semester,
+                            kode: questionData.kode,
+                            kelas: questionData.kelas,
+                            mataPelajaran: questionData.mataPelajaran,
+                            tipe: questionData.tipe
+                        };
+                        UI.hideModal();
 
-                        try {
-                            // Kirim ke GAS - Sekali saja
-                            const result = await callGoogleScript('POST', {
-                                action: 'addQuestion',
-                                data: questionData
-                            });
-                            
-                            // Simpan ke IndexedDB (backup lokal)
-                            await IndexedDBService.put('questions', questionData);
-                            
-                            // Update cache lokal
-                            const cached = CacheHelper.getCached('questions') || [];
-                            cached.push(questionData);
-                            AppState.cache.set('questions', { data: cached, timestamp: Date.now(), valid: true });
-                            
-                            AppState.cache.clear(); 
-                            AppState.lastQuestionData = {
-                                tahunAjaran: questionData.tahunAjaran,
-                                semester: questionData.semester,
-                                kode: questionData.kode,
-                                kelas: questionData.kelas,
-                                mataPelajaran: questionData.mataPelajaran,
-                                tipe: questionData.tipe
-                            };
-                            
-                            if (result && result.status === 'success') {
-                                UI.hideModal();
-                                UI.showNotification('✅ 1 soal berhasil ditambahkan!', 'success');
-                            } else {
-                                UI.hideModal();
-                                UI.showNotification('⚠️ 1 soal disimpan di browser', 'warning');
-                            }
+                        if (saveResult && saveResult.success) {
+                            UI.showNotification('✅ soal berhasil ditambahkan dan tersimpan di Google Sheets!', 'success');
                             UI.loadAndRenderPaginatedQuestions();
-                        } catch (error) {
-                            console.error("Error adding question: ", error);
-                            UI.hideModal();
-                            UI.showNotification('⚠️ Error: ' + error.message, 'error');
-                        } finally {
-                            submitButton.disabled = false;
-                            submitButton.innerHTML = btnOriginalText;
+                        } else {
+                            const warningMessage = saveResult?.message || 'Soal disimpan secara lokal (belum terkirim)';
+                            Swal.fire({
+                                title: '⚠️ Peringatan',
+                                html: `${warningMessage}<br><br><strong>Soal akan otomatis dikirim saat koneksi membaik.</strong>`,
+                                icon: 'warning',
+                                confirmButtonText: 'Simpan Lokal'
+                            });
+                            UI.showNotification('Soal disimpan secara lokal (belum terkirim)', 'warning');
+                            UI.loadAndRenderPaginatedQuestions();
                         }
-                    });
+                    } catch (error) {
+                        console.error("Error adding question: ", error);
+                        UI.showNotification(error.message || 'Gagal menambahkan soal!', 'error');
+                    } finally {
+                         submitButton.disabled = false;
+                         submitButton.innerHTML = 'Simpan';
+                    }
+                });
             },
 
             async viewQuestion(id) {
@@ -3816,98 +3920,19 @@
                     }));
 
                     try {
-                        // ========== KIRIM WAJIB DENGAN VERIFIKASI (BATCH) ==========
-                        
-                        const maxAttempts = 8;
-                        const baseDelay = 2000;
-                        let attempt = 0;
-                        let isVerified = false;
-                        let lastError = '';
-                        
-                        // Update button
-                        button.disabled = true;
-                        button.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i>Mengirim ke Google Sheets... (0/${questionsToSave.length})`;
-                        
-                        // Kirim per-soal dengan verifikasi
-                        const savedQuestions = [];
-                        const failedQuestions = [];
-                        
-                        for (let i = 0; i < questionsToSave.length; i++) {
-                            const q = questionsToSave[i];
-                            q.id = q.id || `q-${Date.now()}-${i}`;
-                            
-                            // Reset attempts untuk setiap soal
-                            attempt = 0;
-                            let qVerified = false;
-                            
-                            while (attempt < maxAttempts && !qVerified) {
-                                attempt++;
-                                
-                                try {
-                                    const result = await callGoogleScript('POST', {
-                                        action: 'addQuestion',
-                                        data: q
-                                    });
-                                    
-                                    if (result && result.status === 'success') {
-                                        // Verifikasi
-                                        const verifyResult = await callGoogleScript('GET', {
-                                            action: 'getQuestions',
-                                            id: q.id
-                                        });
-                                        
-                                        if (verifyResult && verifyResult.status === 'success' && 
-                                            verifyResult.data && verifyResult.data.length > 0) {
-                                            qVerified = true;
-                                            savedQuestions.push(q);
-                                        }
-                                    }
-                                } catch (e) {
-                                    console.warn(`Question ${i+1} attempt ${attempt} failed:`, e);
-                                }
-                                
-                                if (!qVerified && attempt < maxAttempts) {
-                                    await new Promise(resolve => setTimeout(resolve, baseDelay));
-                                }
-                            }
-                            
-                            if (!qVerified) {
-                                failedQuestions.push(q);
-                            }
-                            
-                            // Update progress
-                            button.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i>Mengirim ke Google Sheets... (${savedQuestions.length + failedQuestions.length}/${questionsToSave.length})`;
-                        }
-                        
-                        // Simpan yang berhasil ke IndexedDB
-                        if (savedQuestions.length > 0) {
-                            await IndexedDBService.putBulk('questions', savedQuestions);
-                            const cached = CacheHelper.getCached('questions') || [];
-                            cached.push(...savedQuestions);
-                            AppState.cache.set('questions', { data: cached, timestamp: Date.now(), valid: true });
-                        }
-                        
-                        // Simpan yang gagal ke queue untuk retry
-                        if (failedQuestions.length > 0) {
-                            for (const fq of failedQuestions) {
-                                await IndexedDBService.put('questions', fq);
-                            }
-                        }
-                        
-                        AppState.cache.clear(); 
+                        button.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i>Mengirim ke Google Sheets...`;
+
+                        const saveResult = await DataService.addQuestionsDirect(questionsToSave);
+
+                        AppState.cache.clear();
                         UI.hideGeminiModal();
-                        
-                        if (savedQuestions.length === questionsToSave.length) {
-                            // Semua berhasil
+
+                        if (saveResult && saveResult.success) {
                             UI.showNotification(`✅ ${questionsToSave.length} soal berhasil ditambahkan dan tersimpan di Google Sheets!`, 'success');
-                        } else if (savedQuestions.length > 0) {
-                            // Sebagian berhasil
-                            UI.showNotification(`${savedQuestions.length}/${questionsToSave.length} soal berhasil tersimpan. ${failedQuestions.length} soal disimpan lokal.`, 'warning');
                         } else {
-                            // Semua gagal
-                            UI.showNotification(`⚠️ Gagal mengirim ke Google Sheets. ${questionsToSave.length} soal disimpan lokal.`, 'error');
+                            UI.showNotification(`⚠️ ${saveResult?.message || `${questionsToSave.length} soal disimpan lokal.`}`, 'warning');
                         }
-                        
+
                         UI.loadAndRenderPaginatedQuestions();
                     } catch(error) {
                         console.error('Error saving generated questions:', error);
@@ -6845,9 +6870,9 @@
                     const finalScore = AppState.questions.length > 0 ? Math.round(totalScore / AppState.questions.length) : 0;
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    // Kirim grade juga (tanpa perlu verifikasi - ini tambahan)
+                    let gradeSyncResult = { success: true, localOnly: false, message: '' };
                     try {
-                        await DataService.addGrade({
+                        gradeSyncResult = await DataService.addGradeDirect({
                             gradeId: `${Date.now()}-${AppState.currentUser.username}-${AppState.selectedExamCode}`,
                             kelas: AppState.currentUser.kelas,
                             namaSiswa: AppState.currentUser.nama,
@@ -6862,9 +6887,17 @@
                         });
                     } catch (e) {
                         console.warn('Grade sync failed:', e);
+                        gradeSyncResult = { success: false, localOnly: true, message: e.message || 'Gagal sinkron nilai' };
                     }
-                    
+
                     if (isVerified) {
+                        const gradeWarningHtml = !gradeSyncResult?.success
+                            ? `<div class="bg-yellow-100 border border-yellow-400 text-yellow-800 px-4 py-3 rounded mt-3">
+                                   <i class="fas fa-exclamation-triangle"></i>
+                                   <strong> Nilai akhir belum terkonfirmasi di Google Sheets.</strong><br>
+                                   <small>${gradeSyncResult?.message || 'Nilai tersimpan lokal dan akan dicoba sinkron otomatis.'}</small>
+                               </div>`
+                            : '';
                         // ✅ BERHASIL TERKIRIM DAN TERVERIFIKASI
                         Swal.fire({
                             title: '✅ Ujian Selesai!',
@@ -6875,6 +6908,7 @@
                                    </div>
                                    <h3 class="text-2xl font-bold">Nilai Anda: ${finalScore} (${grade})</h3>
                                    <p class="text-gray-600">${finalScore >= 70 ? '🎉 Selamat! Anda LULUS' : '💪 Tetap semangat! Anda TIDAK LULUS, jangan menyerah!'}</p>
+                                   ${gradeWarningHtml}
                                    <p class="text-sm text-gray-500 mt-4">Anda akan diarahkan ke halaman login...</p>`,
                             icon: 'success',
                             confirmButtonText: 'Keluar',
@@ -7532,19 +7566,12 @@
             const passwordInput = document.getElementById('password');
             const loginError = document.getElementById('loginError');
 
-            try {
-                // Initialize SyncManager first
-                SyncManager.init();
-            } catch(e) { console.error('SyncManager init error:', e); }
+            // Initialize SyncManager first
+            await SyncManager.init();
             
-            try {
-                // Initialize IndexedDB dan BackgroundSync
-                await IndexedDBService.init();
-            } catch(e) { console.error('IndexedDB init error:', e); }
-            
-            try {
-                BackgroundSync.init();
-            } catch(e) { console.error('BackgroundSync init error:', e); }
+            // Initialize IndexedDB dan BackgroundSync
+            await IndexedDBService.init();
+            BackgroundSync.init();
 
             // Show loading state while fetching user data
             loginButton.disabled = true;
@@ -7699,7 +7726,6 @@
         window.IndexedDBService = IndexedDBService;
         window.BackgroundSync = BackgroundSync;
         window.DataService = DataService;
-        window.SyncManager = SyncManager;
     </script>
 </body>
 </html>
