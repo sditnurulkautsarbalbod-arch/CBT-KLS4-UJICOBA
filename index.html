@@ -923,7 +923,10 @@
                     
                     for (const op of pendingOps) {
                         try {
-                            await this.executeOperation(op);
+                            const execResult = await this.executeOperation(op);
+                            if (!execResult || execResult.status !== 'success') {
+                                throw new Error(execResult?.message || 'Server tidak mengonfirmasi sinkronisasi.');
+                            }
                             op.status = 'completed';
                             await IndexedDBService.put('syncQueue', op);
                             console.log(`✅ Sync completed for ${op.action} - ${op.storeName}`);
@@ -996,6 +999,9 @@
                                 return await callGoogleScript('POST', { action: 'addResults', data: data });
                             }
                             return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
+                        case 'addResults':
+                            // Backward compatibility untuk queue legacy submitExam
+                            return await callGoogleScript('POST', { action: 'addResults', data: data });
                         case 'addQuestionsBatch':
                             // Special case: GAS expects 'addQuestionsBatch' action name
                             return await callGoogleScript('POST', { action: 'addQuestionsBatch', data: data });
@@ -6767,39 +6773,48 @@
                     // Setelah dikirim, kita VERIFIKASI bahwa data benar-benar ada di Sheets
                     async function verifyResultsInGoogleSheets(results) {
                         if (!results || results.length === 0) return false;
-                        
-                        // Ambil salah satu resultId untuk verifikasi (cukup 1 per student)
-                        const sampleResultId = results[0].resultId;
-                        
+
+                        const sample = results[0];
+                        const sampleResultId = sample.resultId;
+
                         try {
                             // Query ke Google Sheets untuk cek apakah data ada
                             const verifyResult = await callGoogleScript('GET', {
                                 action: 'getResults',
                                 resultId: sampleResultId
                             });
-                            
-                            // Cek apakah data ditemukan
-                            if (verifyResult && verifyResult.status === 'success' && 
-                                verifyResult.data && verifyResult.data.length > 0) {
-                                console.log('✅ VERIFIKASI BERHASIL: Data ditemukan di Google Sheets');
-                                return true;
-                            } else {
-                                console.warn('⚠️ VERIFIKASI GAGAL: Data tidak ditemukan di Sheets');
+
+                            if (!(verifyResult && verifyResult.status === 'success' && Array.isArray(verifyResult.data))) {
+                                console.warn('⚠️ VERIFIKASI GAGAL: respons verifikasi tidak valid');
                                 return false;
                             }
+
+                            const found = verifyResult.data.some(item =>
+                                item.resultId === sampleResultId ||
+                                (item.namaLengkap === sample.namaLengkap && item.kodesoal === sample.kodesoal && String(item.noSoal) === String(sample.noSoal))
+                            );
+
+                            if (found) {
+                                console.log('✅ VERIFIKASI BERHASIL: Data ditemukan di Google Sheets');
+                                return true;
+                            }
+
+                            console.warn('⚠️ VERIFIKASI GAGAL: resultId sampel belum ditemukan di Sheets');
+                            return false;
                         } catch (error) {
                             console.error('❌ Error saat verifikasi:', error);
                             return false;
                         }
                     }
-                    
+
                     // ========== KIRIM WAJIB DENGAN VERIFIKASI ==========
                     // Loop sampai berhasil terkirim DAN terverifikasi
-                    
-                    const maxAttempts = 15; // Coba hingga 15 kali
-                    const baseDelay = 2000; // 2 detik
+
+                    const maxAttempts = 8;
+                    const baseDelay = 1500;
                     let attempt = 0;
                     let isVerified = false;
+                    let sendSucceeded = false;
                     let lastError = '';
                     
                     // Tampilkan modal "Mengirim..." dengan progress
@@ -6818,49 +6833,54 @@
                     
                     while (attempt < maxAttempts && !isVerified) {
                         attempt++;
-                        
+
                         // Update progress
                         const progressHtml = `
                             <div class="text-center">
                                 <i class="fas fa-spinner fa-spin fa-2x text-blue-500 mb-3"></i><br>
                                 <strong>Percobaan ke-${attempt} dari ${maxAttempts}</strong><br>
-                                <small class="text-gray-500">${lastError || 'Mengirim jawaban...'}</small>
+                                <small class="text-gray-500">${lastError || (sendSucceeded ? 'Memverifikasi data...' : 'Mengirim jawaban...')}</small>
                             </div>
                         `;
                         Swal.getHtmlContainer().innerHTML = progressHtml;
-                        
+
                         try {
-                            // KIRIM DATA KE GOOGLE SHEETS
-                            const result = await callGoogleScript('POST', {
-                                action: 'addResults',
-                                data: preparedResults
-                            });
-                            
-                            if (result && result.status === 'success') {
-                                console.log(`📤 Attempt ${attempt}: GAS Response SUCCESS`);
-                                
+                            if (!sendSucceeded) {
+                                // KIRIM DATA KE GOOGLE SHEETS (sekali, lalu retry verifikasi)
+                                const result = await callGoogleScript('POST', {
+                                    action: 'addResults',
+                                    data: preparedResults
+                                });
+
+                                if (result && result.status === 'success') {
+                                    console.log(`📤 Attempt ${attempt}: GAS Response SUCCESS`);
+                                    sendSucceeded = true;
+                                } else {
+                                    lastError = result?.message || 'Server response tidak valid';
+                                    console.warn(`⚠️ Attempt ${attempt} failed:`, lastError);
+                                }
+                            }
+
+                            if (sendSucceeded) {
                                 // VERIFIKASI: Cek apakah data benar-benar ada di Sheets
                                 isVerified = await verifyResultsInGoogleSheets(preparedResults);
-                                
+
                                 if (isVerified) {
                                     console.log('✅ Data terverifikasi ada di Google Sheets!');
-                                    break; // Keluar dari loop
-                                } else {
-                                    console.warn(`⚠️ Attempt ${attempt}: GAS success tapi VERIFIKASI GAGAL - Data belum ada di Sheets`);
-                                    lastError = 'Menunggu konfirmasi dari server...';
+                                    break;
                                 }
-                            } else {
-                                lastError = result?.message || 'Server response tidak valid';
-                                console.warn(`⚠️ Attempt ${attempt} failed:`, lastError);
+
+                                lastError = 'Menunggu konfirmasi dari server...';
                             }
                         } catch (error) {
                             lastError = error.message;
                             console.error(`❌ Attempt ${attempt} error:`, error);
                         }
-                        
-                        // Jika belum berhasil, tunggu dengan exponential backoff
+
+                        // Jika belum berhasil, tunggu dengan backoff + jitter
                         if (!isVerified && attempt < maxAttempts) {
-                            const delay = baseDelay * Math.min(attempt, 5); // max 10 detik
+                            const jitter = Math.floor(Math.random() * 600);
+                            const delay = (baseDelay * Math.min(attempt, 4)) + jitter;
                             await new Promise(resolve => setTimeout(resolve, delay));
                         }
                     }
@@ -6923,15 +6943,15 @@
                         // Simpan ke IndexedDB untuk backup
                         await IndexedDBService.putBulk('results', preparedResults);
                         
-                        // Simpan ke queue untuk retry manual
+                        // Simpan ke queue untuk retry manual (kontrak queue standar)
                         const queueData = {
-                            id: `queue-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-                            action: 'addResults',
+                            id: `op-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                            action: 'addBatch',
+                            storeName: 'results',
                             data: preparedResults,
                             timestamp: Date.now(),
                             status: 'pending',
-                            retryCount: 0,
-                            maxRetries: 20
+                            retryCount: 0
                         };
                         await IndexedDBService.put('syncQueue', queueData);
                         
