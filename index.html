@@ -411,7 +411,9 @@
 <script type="importmap">
 {
   "imports": {
-    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.24.0"
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.24.0",
+    "firebase/app": "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js",
+    "firebase/firestore": "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js"
   }
 }
 </script>
@@ -434,7 +436,7 @@
                 <div class="bg-gradient-to-r from-cyan-500 to-teal-500 text-white py-4 px-6 rounded-2xl mb-4 shadow-lg">
                     <h1 class="text-xl font-bold tracking-wide">🏫 SD IT NURUL KAUTSAR</h1>
                 </div>
-                <h2 class="text-2xl font-bold bg-gradient-to-r from-cyan-600 to-teal-600 bg-clip-text text-transparent">UJIAN ONLINE KELAS 5</h2>
+                <h2 class="text-2xl font-bold bg-gradient-to-r from-cyan-600 to-teal-600 bg-clip-text text-transparent">UJIAN ONLINE KELAS 4</h2>
             </div>
             
             <!-- Login Form -->
@@ -655,6 +657,8 @@
 
     <script type="module">
         import { GoogleGenAI, Type } from "@google/genai";
+        import { initializeApp } from "firebase/app";
+        import { collection, deleteDoc, doc, getDoc, getDocs, getFirestore, setDoc, writeBatch } from "firebase/firestore";
 
         // =================================================================
         // INDEXED DB SERVICE - Penyimpanan lokal untuk offline & caching
@@ -973,9 +977,10 @@
                 try {
                     switch (action) {
                         case 'add':
-                            // Special case: blockedStudents uses 'blockStudent' action
+                            // Special case: blockedStudents uses Firebase Firestore
                             if (storeName === 'blockedStudents') {
-                                return await callGoogleScript('POST', { action: 'blockStudent', data: data });
+                                await BlockedStudentsRemote.upsert(data);
+                                return { status: 'success', message: 'Blocked student synced to Firebase' };
                             }
                             // Special case: grades action name bisa berbeda antar versi GAS
                             if (storeName === 'grades') {
@@ -1006,9 +1011,10 @@
                             // Special case: GAS expects 'addQuestionsBatch' action name
                             return await callGoogleScript('POST', { action: 'addQuestionsBatch', data: data });
                         case 'update':
-                            // Special case: settings uses 'saveSettings' action
+                            // Special case: settings uses Firebase Firestore
                             if (storeName === 'settings') {
-                                return await callGoogleScript('POST', { action: 'saveSettings', data: data });
+                                await SettingsRemote.saveExamConfig(data);
+                                return { status: 'success', message: 'Settings synced to Firebase' };
                             }
                             const updateResult = await callGoogleScript('POST', { action: `update${this.capitalize(storeName)}`, data: data });
                             // Smart retry: jika UPDATE gagal dengan "not found", coba CREATE
@@ -1018,13 +1024,14 @@
                             }
                             return updateResult;
                         case 'delete':
-                            // Special case: blockedStudents uses 'unblockStudent' action with blockId
+                            // Special case: blockedStudents uses Firebase Firestore
                             if (storeName === 'blockedStudents') {
-                                // Handle single unblock or unblock all
                                 if (data.all) {
-                                    return await callGoogleScript('POST', { action: 'unblockAllStudents', data: {} });
+                                    await BlockedStudentsRemote.deleteAll();
+                                    return { status: 'success', message: 'All blocked students removed from Firebase' };
                                 }
-                                return await callGoogleScript('POST', { action: 'unblockStudent', data: { blockId: data.blockId || data.id, username: data.username, examCode: data.examCode } });
+                                await BlockedStudentsRemote.deleteOne(data);
+                                return { status: 'success', message: 'Blocked student removed from Firebase' };
                             }
                             return await callGoogleScript('POST', { action: `delete${this.capitalize(storeName)}`, data: { id: data.id, ...data } });
                         default:
@@ -1032,7 +1039,7 @@
                     }
                 } catch (error) {
                     // Smart retry untuk network errors pada UPDATE
-                    if (action === 'update' && error.message?.includes('Failed')) {
+                    if (action === 'update' && storeName !== 'settings' && error.message?.includes('Failed')) {
                         console.log(`UPDATE network error for ${storeName}, will retry as CREATE...`);
                         try {
                             return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
@@ -1113,16 +1120,13 @@
                             break;
                             
                         case 'settings':
-                            const settingsResult = await callGoogleScript('GET', { action: 'getSettings', key: 'examConfig' });
-                            if (settingsResult.status === 'success' && settingsResult.data) {
-                                data = [{ id: 'examConfig', ...settingsResult.data }];
-                                AppState.examConfig = settingsResult.data;
-                            }
+                            const settingsData = await SettingsRemote.getExamConfig();
+                            data = [settingsData];
+                            AppState.examConfig = settingsData;
                             break;
                             
                         case 'blockedStudents':
-                            const blockedResult = await callGoogleScript('GET', { action: 'getBlockedStudents' });
-                            data = blockedResult.status === 'success' ? blockedResult.data : [];
+                            data = await BlockedStudentsRemote.list();
                             break;
                     }
                     
@@ -1467,11 +1471,11 @@
                     return { success: false, message: 'Data blokir tidak valid' };
                 }
                 
-                const tempId = `blocked-${Date.now()}`;
-                const newBlock = { 
-                    ...blockData, 
-                    id: tempId,
-                    blockId: blockData.username + '_' + blockData.examCode
+                const blockId = blockData.blockId || BlockedStudentsRemote.buildBlockId(blockData.username, blockData.examCode);
+                const newBlock = {
+                    ...blockData,
+                    id: blockId,
+                    blockId: blockId
                 };
                 
                 // LANGKAH 2: Simpan ke IndexedDB dulu
@@ -1482,31 +1486,17 @@
                 cached.push(newBlock);
                 AppState.cache.set('blockedStudents', { data: cached, timestamp: Date.now(), valid: true });
                 
-                // LANGKAH 3: Kirim langsung ke Google Sheets (SINKRON)
+                // LANGKAH 3: Kirim langsung ke Firebase Firestore (SINKRON)
                 try {
-                    const result = await callGoogleScript('POST', {
-                        action: 'blockStudent',
-                        data: {
-                            username: blockData.username,
-                            examCode: blockData.examCode
-                        }
-                    });
-                    
+                    await BlockedStudentsRemote.upsert(newBlock);
+
                     // LANGKAH 4: VERIFIKASI
-                    if (result && result.status === 'success') {
-                        await DataService.getBlockedStudents(true);
-                        return { success: true, message: 'Siswa berhasil diblokir di Google Sheets' };
-                    } else {
-                        return { 
-                            success: false, 
-                            message: `Gagal memblokir: ${result?.message || 'Unknown error'}. Data disimpan secara lokal.`,
-                            localOnly: true
-                        };
-                    }
+                    await DataService.getBlockedStudents(true);
+                    return { success: true, message: 'Siswa berhasil diblokir di Firebase' };
                 } catch (error) {
-                    console.error('Error blocking student in GAS:', error);
-                    return { 
-                        success: false, 
+                    console.error('Error blocking student in Firebase:', error);
+                    return {
+                        success: false,
                         message: `Error: ${error.message}. Data disimpan secara lokal.`,
                         localOnly: true
                     };
@@ -1580,11 +1570,6 @@
             async addQuestions(questionsArray) {
                 // Redirect ke versi direct dengan verifikasi
                 return await this.addQuestionsDirect(questionsArray);
-            },
-            
-            async blockStudent(blockData) {
-                // Redirect ke versi direct dengan verifikasi
-                return await this.blockStudentDirect(blockData);
             },
             
             async addResults(resultsArray) {
@@ -1965,7 +1950,7 @@
                 return { success: true, message: `${gradeIds.length} nilai berhasil dihapus` };
             },
             
-            // ============ BLOCKED STUDENTS (Updated with Direct GAS + Verification) ============
+            // ============ BLOCKED STUDENTS (Firebase Firestore) ============
             async getBlockedStudents(forceRefresh = false) {
                 if (!forceRefresh && CacheHelper.isCacheValid('blockedStudents')) {
                     const cached = CacheHelper.getCached('blockedStudents');
@@ -1983,110 +1968,54 @@
                     } catch (e) { console.warn('IDB read error:', e); }
                 }
                 
-                const result = await callGoogleScript('GET', { action: 'getBlockedStudents' });
-                const data = result.status === 'success' ? result.data : [];
-                
+                const data = await BlockedStudentsRemote.list();
+
                 AppState.cache.set('blockedStudents', { data, timestamp: Date.now(), valid: true });
                 await IndexedDBService.clear('blockedStudents');
-                await IndexedDBService.putBulk('blockedStudents', data.map((b, i) => ({ ...b, id: b.id || `blocked-${i}` })));
+                await IndexedDBService.putBulk('blockedStudents', data.map((b, i) => ({ ...b, id: b.id || b.blockId || `blocked-${i}` })));
                 await IndexedDBService.markSynced('blockedStudents');
-                
+
                 return data;
             },
             
-            // blockStudent sekarang redirect ke blockStudentDirect yang sudah verifikasi
             async blockStudent(blockData) {
-                return await this.blockStudentDirect(blockData);
-            },
-            
-            async unblockStudent(blockId) {
+                const blockId = blockData.blockId || BlockedStudentsRemote.buildBlockId(blockData.username, blockData.examCode);
+                const newBlock = {
+                    ...blockData,
+                    id: blockData.id || blockId,
+                    blockId: blockId,
+                    blockedAt: blockData.blockedAt || new Date().toLocaleString('id-ID')
+                };
+
                 const cached = CacheHelper.getCached('blockedStudents') || [];
-                // Find the blocked student to get username and examCode for proper sync
-                const blockedStudent = cached.find(b => b.id === blockId || b.blockId === blockId);
-
-                // Sync directly with Google Sheets first (wait for completion)
-                const syncData = blockedStudent
-                    ? { blockId: blockedStudent.blockId, username: blockedStudent.username, examCode: blockedStudent.examCode }
-                    : { blockId: blockId };
-
-                try {
-                    const result = await callGoogleScript('POST', { action: 'unblockStudent', data: syncData });
-                    
-                    // VERIFIKASI sebelum hapus dari lokal
-                    if (result && result.status === 'success') {
-                        // Refresh from server
-                        await this.getBlockedStudents(true);
-                    } else {
-                        console.warn('Unblock sync failed:', result?.message);
-                    }
-                } catch (e) {
-                    console.error('Error syncing unblock to Google Sheets:', e);
+                const existingIndex = cached.findIndex(b => b.blockId === newBlock.blockId || b.id === newBlock.id);
+                if (existingIndex === -1) {
+                    cached.push(newBlock);
+                } else {
+                    cached[existingIndex] = { ...cached[existingIndex], ...newBlock };
                 }
-
-                // Update local cache and IndexedDB
-                const filteredData = cached.filter(b => b.id !== blockId && b.blockId !== blockId);
-                AppState.cache.set('blockedStudents', { data: filteredData, timestamp: Date.now(), valid: true });
-                await IndexedDBService.delete('blockedStudents', blockId);
-
-                return { success: true, message: 'Siswa berhasil di-unblock' };
-            },
-
-            async unblockAllStudents() {
-                // Sync directly with Google Sheets first (wait for completion)
-                try {
-                    const result = await callGoogleScript('POST', { action: 'unblockAllStudents', data: {} });
-                    
-                    // VERIFIKASI
-                    if (result && result.status === 'success') {
-                        // Clear local
-                        AppState.cache.set('blockedStudents', { data: [], timestamp: Date.now(), valid: true });
-                        await IndexedDBService.clear('blockedStudents');
-                    } else {
-                        console.warn('Unblock all sync failed:', result?.message);
-                    }
-                } catch (e) {
-                    console.error('Error syncing unblock all to Google Sheets:', e);
-                    // Still continue to update local cache/IndexedDB
-                    AppState.cache.set('blockedStudents', { data: [], timestamp: Date.now(), valid: true });
-                    await IndexedDBService.clear('blockedStudents');
-                }
-
-                return { success: true, message: 'Semua siswa berhasil di-unblock' };
-            },
-            
-            async blockStudent(blockData) {
-                const tempId = `blocked-${Date.now()}`;
-                const newBlock = { ...blockData, id: tempId };
-                
-                const cached = CacheHelper.getCached('blockedStudents') || [];
-                cached.push(newBlock);
                 AppState.cache.set('blockedStudents', { data: cached, timestamp: Date.now(), valid: true });
                 await IndexedDBService.put('blockedStudents', newBlock);
-                
-                // Enqueue for background sync
+
                 await BackgroundSync.queueOperation('add', 'blockedStudents', newBlock);
-                
+
                 return { success: true, message: 'Siswa berhasil diblokir' };
             },
             
             async unblockStudent(blockId) {
                 const cached = CacheHelper.getCached('blockedStudents') || [];
-                // Find the blocked student to get username and examCode for proper sync
                 const blockedStudent = cached.find(b => b.id === blockId || b.blockId === blockId);
 
-                // Sync directly with Google Sheets first (wait for completion)
                 const syncData = blockedStudent
                     ? { blockId: blockedStudent.blockId, username: blockedStudent.username, examCode: blockedStudent.examCode }
                     : { blockId: blockId };
 
                 try {
-                    await callGoogleScript('POST', { action: 'unblockStudent', data: syncData });
+                    await BlockedStudentsRemote.deleteOne(syncData);
                 } catch (e) {
-                    console.error('Error syncing unblock to Google Sheets:', e);
-                    // Still continue to update local cache/IndexedDB
+                    console.error('Error syncing unblock to Firebase:', e);
                 }
 
-                // Update local cache and IndexedDB
                 const filteredData = cached.filter(b => b.id !== blockId && b.blockId !== blockId);
                 AppState.cache.set('blockedStudents', { data: filteredData, timestamp: Date.now(), valid: true });
                 await IndexedDBService.delete('blockedStudents', blockId);
@@ -2095,15 +2024,12 @@
             },
 
             async unblockAllStudents() {
-                // Sync directly with Google Sheets first (wait for completion)
                 try {
-                    await callGoogleScript('POST', { action: 'unblockAllStudents', data: {} });
+                    await BlockedStudentsRemote.deleteAll();
                 } catch (e) {
-                    console.error('Error syncing unblock all to Google Sheets:', e);
-                    // Still continue to update local cache/IndexedDB
+                    console.error('Error syncing unblock all to Firebase:', e);
                 }
 
-                // Update local cache and IndexedDB
                 AppState.cache.set('blockedStudents', { data: [], timestamp: Date.now(), valid: true });
                 await IndexedDBService.clear('blockedStudents');
 
@@ -2135,32 +2061,35 @@
                     } catch (e) { console.warn('IDB read error:', e); }
                 }
                 
-                const result = await callGoogleScript('GET', { action: 'getSettings', key: key });
-                let data;
-                if (result.status === 'success' && result.data) {
-                    data = { id: 'examConfig', key: key, ...result.data };
-                } else {
-                    data = { id: 'examConfig', key: key, durationMinutes: 60 };
-                }
-                
+                const remoteSettings = await SettingsRemote.getExamConfig();
+                const data = {
+                    id: 'examConfig',
+                    key: key || 'examConfig',
+                    durationMinutes: Number(remoteSettings.durationMinutes) > 0 ? Number(remoteSettings.durationMinutes) : 60
+                };
+
                 AppState.cache.set('settings', { data, timestamp: Date.now(), valid: true });
                 AppState.examConfig = data;
                 await IndexedDBService.clear('settings');
                 await IndexedDBService.put('settings', data);
                 await IndexedDBService.markSynced('settings');
-                
+
                 return data;
             },
             
             async saveSettings(settingsData) {
-                const data = { id: 'examConfig', ...settingsData };
+                const data = {
+                    id: 'examConfig',
+                    key: settingsData?.key || 'examConfig',
+                    durationMinutes: Number(settingsData?.durationMinutes) > 0 ? Number(settingsData.durationMinutes) : 60
+                };
+
                 AppState.cache.set('settings', { data, timestamp: Date.now(), valid: true });
                 AppState.examConfig = data;
                 await IndexedDBService.put('settings', data);
-                
-                // Enqueue for background sync
+
                 await BackgroundSync.queueOperation('update', 'settings', data);
-                
+
                 return { success: true, message: 'Pengaturan berhasil disimpan' };
             }
         };
@@ -2727,7 +2656,121 @@
         // =================================================================
         // GOOGLE SCRIPT HELPER
         // =================================================================
-        const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwu3iYpI327GbCHcBiTxXt1c0MvUuDjmL-rh3EFvSGMvrY0EXM1-E-XgHJKdmw6GaGp/exec';
+        const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxUXn_HXwa6po6hJHeCoEZviObKQcDImpHNaWlgSnUs_abK0Y_cagXmOURXkoa8HUz53Q/exec';
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyCfPfYFpC8uSQIz27PpoBziC73zvBIig7A",
+            authDomain: "ujian-nk.firebaseapp.com",
+            projectId: "ujian-nk",
+            storageBucket: "ujian-nk.firebasestorage.app",
+            messagingSenderId: "808060384539",
+            appId: "1:808060384539:web:554d3b41415f545e57cfbe"
+        };
+
+        const firebaseApp = initializeApp(firebaseConfig);
+        const firestoreDb = getFirestore(firebaseApp);
+        const blockedStudentsCollectionName = 'blockedStudents';
+        const settingsCollectionName = 'settings';
+
+        const SettingsRemote = {
+            async getExamConfig() {
+                const settingsRef = doc(firestoreDb, settingsCollectionName, 'examConfig');
+                const snapshot = await getDoc(settingsRef);
+
+                if (!snapshot.exists()) {
+                    return { id: 'examConfig', key: 'examConfig', durationMinutes: 60 };
+                }
+
+                const data = snapshot.data() || {};
+                return {
+                    id: 'examConfig',
+                    key: data.key || 'examConfig',
+                    durationMinutes: Number(data.durationMinutes) > 0 ? Number(data.durationMinutes) : 60
+                };
+            },
+
+            async saveExamConfig(settingsData = {}) {
+                const payload = {
+                    id: 'examConfig',
+                    key: settingsData.key || 'examConfig',
+                    durationMinutes: Number(settingsData.durationMinutes) > 0 ? Number(settingsData.durationMinutes) : 60
+                };
+
+                await setDoc(doc(firestoreDb, settingsCollectionName, 'examConfig'), payload, { merge: true });
+                return payload;
+            }
+        };
+
+        const BlockedStudentsRemote = {
+            buildBlockId(username, examCode) {
+                return `${username}_${examCode}`;
+            },
+
+            resolveDocId(data = {}) {
+                if (data.blockId) return data.blockId;
+                if (data.username && data.examCode) return this.buildBlockId(data.username, data.examCode);
+                if (data.id) return data.id;
+                return null;
+            },
+
+            async list() {
+                const snapshot = await getDocs(collection(firestoreDb, blockedStudentsCollectionName));
+                const records = [];
+
+                snapshot.forEach((docSnap) => {
+                    const row = docSnap.data() || {};
+                    records.push({
+                        id: row.id || docSnap.id,
+                        blockId: row.blockId || docSnap.id,
+                        username: row.username || '',
+                        examCode: row.examCode || '',
+                        blockedAt: row.blockedAt || ''
+                    });
+                });
+
+                return records;
+            },
+
+            async upsert(data) {
+                const docId = this.resolveDocId(data);
+                if (!docId) {
+                    throw new Error('Data blokir tidak valid: blockId tidak ditemukan');
+                }
+
+                const payload = {
+                    id: data.id || docId,
+                    blockId: docId,
+                    username: data.username || '',
+                    examCode: data.examCode || '',
+                    blockedAt: data.blockedAt || new Date().toLocaleString('id-ID')
+                };
+
+                await setDoc(doc(firestoreDb, blockedStudentsCollectionName, docId), payload, { merge: true });
+                return payload;
+            },
+
+            async deleteOne(data) {
+                const docId = this.resolveDocId(data);
+                if (!docId) {
+                    throw new Error('Data unblock tidak valid: blockId tidak ditemukan');
+                }
+
+                await deleteDoc(doc(firestoreDb, blockedStudentsCollectionName, docId));
+                return true;
+            },
+
+            async deleteAll() {
+                const snapshot = await getDocs(collection(firestoreDb, blockedStudentsCollectionName));
+                if (snapshot.empty) return true;
+
+                const batch = writeBatch(firestoreDb);
+                snapshot.forEach((docSnap) => {
+                    batch.delete(docSnap.ref);
+                });
+                await batch.commit();
+                return true;
+            }
+        };
 
         async function callGoogleScript(method = 'GET', params = {}) {
             const url = new URL(SCRIPT_URL);
