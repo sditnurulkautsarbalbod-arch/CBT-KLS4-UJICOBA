@@ -2043,7 +2043,7 @@
             },
             
             // ============ SETTINGS ============
-            async getSettings(key = 'examConfig', forceRefresh = false) {
+            async getSettings(key = 'examConfig', forceRefresh = (key === 'examConfig')) {
                 if (!forceRefresh && CacheHelper.isCacheValid('settings')) {
                     const cached = CacheHelper.getCached('settings');
                     if (cached) return cached;
@@ -2089,8 +2089,14 @@
                 AppState.examConfig = data;
                 await IndexedDBService.put('settings', data);
 
-                await BackgroundSync.queueOperation('update', 'settings', data);
+                try {
+                    await SettingsRemote.saveExamConfig(data);
+                } catch (error) {
+                    await BackgroundSync.queueOperation('update', 'settings', data);
+                    return { success: true, message: 'Pengaturan disimpan lokal, sinkronisasi ke server tertunda.' };
+                }
 
+                await IndexedDBService.markSynced('settings');
                 return { success: true, message: 'Pengaturan berhasil disimpan' };
             }
         };
@@ -2699,6 +2705,15 @@
 
                 await setDoc(doc(firestoreDb, settingsCollectionName, 'examConfig'), payload, { merge: true });
                 return payload;
+            }
+        };
+
+        window.cbtDebug = {
+            async listBlockedStudents() {
+                return await BlockedStudentsRemote.list();
+            },
+            async clearBlockedStudents() {
+                return await BlockedStudentsRemote.deleteAll();
             }
         };
 
@@ -5845,8 +5860,8 @@
                 let currentDuration = 60; // Default duration in minutes
                 
                 try {
-                    // Arsitektur baru: IndexedDB → Google Apps Script
-                    const settings = await DataService.getSettings('examConfig');
+                    // Arsitektur baru: ambil pengaturan terbaru dari Firebase
+                    const settings = await DataService.getSettings('examConfig', true);
                     if (settings && settings.durationMinutes) {
                         currentDuration = settings.durationMinutes;
                     }
