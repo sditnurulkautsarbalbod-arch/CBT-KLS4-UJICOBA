@@ -2038,7 +2038,7 @@
             },
             
             async isStudentBlocked(username, examCode) {
-                const blocked = await this.getBlockedStudents();
+                const blocked = await this.getBlockedStudents(true);
                 return blocked.some(b => b.username === username && b.examCode === examCode);
             },
             
