@@ -2019,6 +2019,7 @@
                 const filteredData = cached.filter(b => b.id !== blockId && b.blockId !== blockId);
                 AppState.cache.set('blockedStudents', { data: filteredData, timestamp: Date.now(), valid: true });
                 await IndexedDBService.delete('blockedStudents', blockId);
+                await this.getBlockedStudents(true);
 
                 return { success: true, message: 'Siswa berhasil di-unblock' };
             },
@@ -2750,12 +2751,30 @@
             },
 
             async deleteOne(data) {
-                const docId = this.resolveDocId(data);
-                if (!docId) {
-                    throw new Error('Data unblock tidak valid: blockId tidak ditemukan');
+                const directDocId = this.resolveDocId(data);
+                if (directDocId) {
+                    await deleteDoc(doc(firestoreDb, blockedStudentsCollectionName, directDocId));
                 }
 
-                await deleteDoc(doc(firestoreDb, blockedStudentsCollectionName, docId));
+                if (!data?.username || !data?.examCode) {
+                    return true;
+                }
+
+                const snapshot = await getDocs(collection(firestoreDb, blockedStudentsCollectionName));
+                let deletedByMatch = false;
+
+                for (const docSnap of snapshot.docs) {
+                    const row = docSnap.data() || {};
+                    if (row.username === data.username && row.examCode === data.examCode) {
+                        await deleteDoc(docSnap.ref);
+                        deletedByMatch = true;
+                    }
+                }
+
+                if (!directDocId && !deletedByMatch) {
+                    throw new Error('Data unblock tidak ditemukan di Firebase');
+                }
+
                 return true;
             },
 
